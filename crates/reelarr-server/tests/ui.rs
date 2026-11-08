@@ -96,3 +96,27 @@ async fn health_returns_ok() {
     let health: Health = serde_json::from_str(&body).unwrap();
     assert_eq!(health.status, "ok");
 }
+
+#[tokio::test]
+async fn ui_responses_carry_security_headers() {
+    let res = test_app()
+        .oneshot(Request::get("/").body(Body::empty()).unwrap())
+        .await
+        .unwrap();
+    let h = res.headers();
+    assert_eq!(h["cache-control"], "no-store");
+    assert_eq!(h["x-content-type-options"], "nosniff");
+    assert_eq!(h["referrer-policy"], "same-origin");
+    assert_eq!(h["content-security-policy"], "frame-ancestors 'none'");
+    assert_eq!(h["x-frame-options"], "DENY");
+}
+
+#[tokio::test]
+async fn unknown_api_path_404s_while_auth_routes_respond() {
+    let (status, content_type, _) = get("/api/v1/nope").await;
+    assert_eq!(status, 404);
+    assert!(content_type.starts_with("application/json"));
+    let (status, content_type, _) = get("/api/v1/auth/session").await;
+    assert!(status.is_success(), "{status}");
+    assert!(content_type.starts_with("application/json"));
+}

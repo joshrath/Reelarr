@@ -7,7 +7,6 @@ on:
 
 env:
   CARGO_TERM_COLOR: always
-  CARGO_LEPTOS_VERSION: 0.3.11
 
 jobs:
   check:
@@ -26,26 +25,6 @@ jobs:
         run: cargo clippy -p reelarr-ui --lib --target wasm32-unknown-unknown --features hydrate -- -D warnings
       - run: cargo test --workspace
 
-  ui-build:
-    runs-on: ubuntu-latest
-    needs: check
-    steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          targets: wasm32-unknown-unknown
-      - uses: Swatinem/rust-cache@v2
-      - uses: taiki-e/install-action@v2
-        with:
-          tool: cargo-leptos@${{ env.CARGO_LEPTOS_VERSION }}
-      - name: Build server and site
-        run: cargo leptos build --release
-      - name: Check site assets
-        run: |
-          test -s target/site/pkg/reelarr.wasm
-          test -s target/site/pkg/reelarr.js
-          test -s target/site/pkg/reelarr.css
-
   docker:
     runs-on: ubuntu-latest
     needs: check
@@ -58,10 +37,17 @@ jobs:
           push: false
           load: true
           tags: reelarr:ci
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
       - name: Smoke test container
         run: |
           docker run -d --name reelarr -p 7979:7979 reelarr:ci
           for i in $(seq 1 30); do curl -fsS http://localhost:7979/health && break; sleep 1; done
           curl -fsS http://localhost:7979/ | grep -q 'aria-label="Main"'
-          curl -fsS -o /dev/null http://localhost:7979/pkg/reelarr.wasm
+          # The release image is the only cargo-leptos build in CI, so check
+          # the site assets it ships.
+          for f in reelarr.wasm reelarr.js reelarr.css; do
+            curl -fsS -o /dev/null "http://localhost:7979/pkg/$f"
+          done
+          curl -fsSI http://localhost:7979/ | grep -qi '^x-content-type-options: nosniff'
           docker rm -f reelarr
