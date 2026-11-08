@@ -2,7 +2,9 @@
 
 use serde::{Deserialize, Serialize};
 
+pub mod job;
 pub mod movie;
+pub use job::{JobEvent, JobEventKind, JobState, Progress};
 
 pub use movie::{
     Artwork, ExternalIds, MediaFile, MediaFileId, Movie, MovieId, MovieMetadata, MovieSearchResult,

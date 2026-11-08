@@ -7,3 +7,13 @@ license.workspace = true
 repository.workspace = true
 
 [dependencies]
+reelarr-types = { path = "../reelarr-types" }
+async-trait = "0.1"
+thiserror = "2"
+tokio = { workspace = true }
+tracing = { workspace = true }
+uuid = { version = "1", features = ["v7"] }
+
+[dev-dependencies]
+serde_json = { workspace = true }
+tempfile = "3"
