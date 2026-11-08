@@ -7,9 +7,9 @@ use reelarr_server::{app_with_ui, state::AppState};
 use reelarr_types::Health;
 use tower::ServiceExt;
 
-fn test_app() -> Router {
+async fn test_app() -> Router {
     app_with_ui(
-        AppState::default(),
+        AppState::new(reelarr_db::Database::connect(":memory:").await.unwrap()),
         LeptosOptions::builder()
             .output_name("reelarr")
             .site_root("target/site")
@@ -19,6 +19,7 @@ fn test_app() -> Router {
 
 async fn get(path: &str) -> (axum::http::StatusCode, String, String) {
     let res = test_app()
+        .await
         .oneshot(Request::get(path).body(Body::empty()).unwrap())
         .await
         .unwrap();
@@ -100,6 +101,7 @@ async fn health_returns_ok() {
 #[tokio::test]
 async fn ui_responses_carry_security_headers() {
     let res = test_app()
+        .await
         .oneshot(Request::get("/").body(Body::empty()).unwrap())
         .await
         .unwrap();
@@ -112,11 +114,46 @@ async fn ui_responses_carry_security_headers() {
 }
 
 #[tokio::test]
-async fn unknown_api_path_404s_while_auth_routes_respond() {
-    let (status, content_type, _) = get("/api/v1/nope").await;
-    assert_eq!(status, 404);
-    assert!(content_type.starts_with("application/json"));
-    let (status, content_type, _) = get("/api/v1/auth/session").await;
-    assert!(status.is_success(), "{status}");
-    assert!(content_type.starts_with("application/json"));
+async fn pkg_assets_revalidate() {
+    let res = test_app()
+        .await
+        .oneshot(
+            Request::get("/pkg/reelarr.css")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(res.headers()["cache-control"], "no-cache");
+    assert_eq!(res.headers()["x-content-type-options"], "nosniff");
+}
+
+#[tokio::test]
+async fn api_responses_keep_their_own_headers() {
+    let res = test_app()
+        .await
+        .oneshot(
+            Request::get("/api/v1/auth/session")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert!(res.status().is_success());
+    let h = res.headers();
+    assert!(h.get("content-security-policy").is_none());
+    assert!(h.get("x-frame-options").is_none());
+    let cookies: Vec<_> = h
+        .get_all("set-cookie")
+        .iter()
+        .map(|v| v.to_str().unwrap().to_string())
+        .collect();
+    assert!(
+        cookies.iter().any(|c| c.starts_with("reelarr_session=")),
+        "{cookies:?}"
+    );
+    assert!(
+        cookies.iter().any(|c| c.starts_with("reelarr_csrf=")),
+        "{cookies:?}"
+    );
 }

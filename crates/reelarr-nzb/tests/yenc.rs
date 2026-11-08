@@ -568,7 +568,7 @@ async fn checkpoint_only_after_durable_complete_file_and_matching_nzb() {
     let dir = Dir::new();
     let mut a = assembler(&dir, 1);
     let store = InMemoryNzbStore::default();
-    let job = JobId(13);
+    let job = JobId::new();
     store
         .insert(
             job,

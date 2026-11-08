@@ -16,8 +16,8 @@ use reelarr_server::{
 use reelarr_types::{ApiError, Health, SessionInfo, SetupStatus};
 use tower::ServiceExt;
 
-fn test_app() -> Router {
-    let state = AppState::default();
+async fn test_app() -> Router {
+    let state = AppState::new(reelarr_db::Database::connect(":memory:").await.unwrap());
     let protected = Router::new()
         .route(
             "/protected",
@@ -86,7 +86,7 @@ const CREDENTIALS: &str = r#"{"username":"admin","password":"a-long-password"}"#
 
 #[tokio::test]
 async fn setup_login_session_protected_logout() {
-    let app = test_app();
+    let app = test_app().await;
     let status: SetupStatus =
         json(request(&app, "GET", "/api/v1/auth/setup", "", "", "").await).await;
     assert!(status.needs_setup);
@@ -183,7 +183,7 @@ async fn setup_login_session_protected_logout() {
 
 #[tokio::test]
 async fn no_cookie_health_and_csrf_rejection() {
-    let app = test_app();
+    let app = test_app().await;
     let response = request(&app, "GET", "/protected", "", "", "").await;
     assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
     assert_eq!(json::<ApiError>(response).await.code, "unauthorized");
