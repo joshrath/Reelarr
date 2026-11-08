@@ -1,6 +1,6 @@
 use std::net::SocketAddr;
 
-use reelarr_server::{app, state::AppState};
+use reelarr_server::{app_with_ui, leptos_options, state::AppState};
 
 #[tokio::main]
 async fn main() {
@@ -15,7 +15,7 @@ async fn main() {
         .await
         .expect("failed to bind port");
     tracing::info!("Reelarr listening on {addr}");
-    axum::serve(listener, app(AppState::default()))
+    axum::serve(listener, app_with_ui(AppState::default(), leptos_options()))
         .await
         .expect("server error");
 }

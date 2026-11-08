@@ -49,10 +49,15 @@ flowchart LR
 
 ## Running (dev)
 
+The web UI is built with [cargo-leptos](https://github.com/leptos-rs/cargo-leptos), which compiles the server and the WebAssembly front end together:
+
 ```sh
-cargo run --bin reelarr
-curl http://localhost:7979/health
+cargo install cargo-leptos --version 0.3.11 --locked   # once
+cargo leptos watch      # dev server with live reload on http://localhost:7979
+cargo leptos build --release
 ```
+
+`cargo run --bin reelarr` still works for the API (`curl http://localhost:7979/health`); pages render without client-side hydration until `cargo leptos build` has produced `target/site`.
 
 Or with Docker:
 
