@@ -2371,6 +2371,7 @@ version = "0.0.1"
 dependencies = [
  "async-trait",
  "reelarr-core",
+ "reelarr-types",
  "sqlx",
  "tempfile",
  "thiserror 2.0.21",

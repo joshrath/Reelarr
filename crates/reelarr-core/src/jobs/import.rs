@@ -76,7 +76,7 @@ pub enum PathMapping {
 /// implementation must also make its own file/database work retry-safe.
 ///
 /// The media handler persists media_file_id in its own store; this function changes
-/// only the job lifecycle. SQL JobStore persistence follows after PR #39 merges.
+/// only the job lifecycle; reelarr-db supplies the durable JobStore adapter.
 pub async fn run_import(
     store: &dyn JobStore,
     handler: &dyn ImportHandler,
