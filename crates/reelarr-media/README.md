@@ -45,3 +45,33 @@ and [developer FAQ](https://developer.themoviedb.org/docs/faq):
   fetched, and refresh and purge are tracked in #20.
 - TMDB may rate-limit requests. HTTP 429 is returned as
   `MetadataError::RateLimited` with the `Retry-After` value, when it is present.
+
+## Library scanning
+
+`scan::Scanner::scan_root` walks a configured `LibraryRoot`, which can be a
+library folder, a network share or a manual-import folder. It records video
+files in a `MediaFileStore`. The SQLite implementation lives in `reelarr-db`,
+and `InMemoryMediaFileStore` is for tests.
+
+- **Probing.** `FfprobeProber` runs `ffprobe -v error -print_format json
+  -show_format -show_streams` as a separate process, with a timeout and
+  `kill_on_drop`. It reads the container, duration, bit rate and, for each
+  stream, the codec, profile, resolution, channels, language and the
+  default and forced flags. `ScanOptions::probe_concurrency` (default 2)
+  limits how many probes run at once, which matters on slow shares.
+- **Change detection.** A file is re-probed only when its size or mtime
+  changes, or when an earlier probe failed.
+- **Missing files.** A file that disappears is marked `Missing { since }`.
+  It is never deleted, and it is restored if it comes back unchanged.
+- **Unmounted shares.** If the root path is missing, nothing is marked
+  missing (`RootUnavailable`). The same goes for a root that is reachable
+  but contains no video files while the library knows some
+  (`RootLooksUnmounted`).
+- **What gets skipped.** Hidden files and folders, `.reelarr-partial` import
+  temporaries and anything that isn't a video extension. Symlinks are not
+  followed.
+- **Periodic rescans.** `scan::run_periodic` polls each root on its
+  `rescan_interval_secs` (default 6 hours, configurable per root, `None`
+  disables it) until it is told to shut down. Polling is used because
+  inotify-style notifications are unreliable on SMB and NFS. Only one scan
+  per root runs at a time.

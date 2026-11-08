@@ -5,7 +5,9 @@ use serde::{Deserialize, Serialize};
 pub mod movie;
 
 pub use movie::{
-    Artwork, ExternalIds, MediaFile, MediaFileId, Movie, MovieId, MovieMetadata, MovieSearchResult,
+    Artwork, DEFAULT_RESCAN_INTERVAL_SECS, ExternalIds, LibraryRoot, LibraryRootId,
+    LibraryRootKind, MediaFile, MediaFileId, MediaFileStatus, MediaProbe, MediaStream, Movie,
+    MovieId, MovieMetadata, MovieSearchResult, StreamKind,
 };
 
 /// Response body for the `/health` endpoint.
