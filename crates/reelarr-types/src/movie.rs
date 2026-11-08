@@ -67,15 +67,101 @@ pub struct MovieSearchResult {
     pub poster_path: Option<String>,
 }
 
-/// A media file that belongs to a movie. Probe data (codecs, duration)
-/// is added by the library scanner.
+/// A media file found in a library root. Probe data comes from the library
+/// scanner.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct MediaFile {
     pub id: MediaFileId,
     pub movie_id: Option<MovieId>,
+    /// The library root this file was found under.
+    pub root_id: LibraryRootId,
     /// Absolute path inside the Reelarr container.
     pub path: String,
     pub size_bytes: u64,
+    /// Modification time as Unix seconds, used for change detection.
+    pub modified_at: i64,
+    pub status: MediaFileStatus,
+    /// `None` until the file has been probed successfully.
+    pub probe: Option<MediaProbe>,
+}
+
+/// Whether a known file is currently on disk.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "state", rename_all = "snake_case")]
+pub enum MediaFileStatus {
+    Present,
+    /// The file was not found by a scan of a reachable root. It is kept, not
+    /// deleted, so an unmounted share does not wipe the library.
+    Missing {
+        since: i64,
+    },
+}
+
+/// Reelarr's identifier for a configured library root.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct LibraryRootId(pub i64);
+
+/// What a library root is used for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LibraryRootKind {
+    /// A folder of organized movies.
+    Library,
+    /// A folder of files the user wants to import by hand.
+    ManualImport,
+}
+
+/// Default rescan interval for a library root: six hours.
+pub const DEFAULT_RESCAN_INTERVAL_SECS: u64 = 6 * 60 * 60;
+
+/// A folder Reelarr scans for media, local or on a network share.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LibraryRoot {
+    pub id: LibraryRootId,
+    /// Absolute path inside the Reelarr container.
+    pub path: String,
+    pub kind: LibraryRootKind,
+    /// How often the root is rescanned. `None` disables periodic rescans.
+    pub rescan_interval_secs: Option<u64>,
+}
+
+/// Technical details of a media file, read with ffprobe.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct MediaProbe {
+    /// Container names as reported by ffprobe, e.g. `["mov", "mp4"]`.
+    pub container: Vec<String>,
+    pub duration_ms: Option<u64>,
+    pub bit_rate: Option<u64>,
+    pub streams: Vec<MediaStream>,
+}
+
+/// One stream inside a media file.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MediaStream {
+    pub index: u32,
+    pub kind: StreamKind,
+    /// Codec name as reported by ffprobe, e.g. `h264`, `aac`, `subrip`.
+    pub codec: Option<String>,
+    pub profile: Option<String>,
+    pub width: Option<u32>,
+    pub height: Option<u32>,
+    pub channels: Option<u32>,
+    /// ISO 639-2 language tag, when present and not `und`.
+    pub language: Option<String>,
+    pub default: bool,
+    pub forced: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum StreamKind {
+    Video,
+    Audio,
+    Subtitle,
+    Attachment,
+    Data,
+    Other,
 }
 
 #[cfg(test)]
