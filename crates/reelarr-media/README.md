@@ -45,3 +45,57 @@ and [developer FAQ](https://developer.themoviedb.org/docs/faq):
   fetched, and refresh and purge are tracked in #20.
 - TMDB may rate-limit requests. HTTP 429 is returned as
   `MetadataError::RateLimited` with the `Retry-After` value, when it is present.
+
+## Library scanning
+
+`scan::Scanner::scan_root` walks a configured `LibraryRoot`, which can be a
+library folder, a network share or a manual-import folder. It records video
+files in a `MediaFileStore`. The SQLite implementation lives in `reelarr-db`,
+and `InMemoryMediaFileStore` is for tests.
+
+- **Probing.** `FfprobeProber` runs `ffprobe -v error -print_format json
+  -show_format -show_streams` as a separate process, with a timeout and
+  `kill_on_drop`. It reads the container, duration, bit rate and, for each
+  stream, the codec, profile, resolution, channels, language and the
+  default and forced flags. `ScanOptions::probe_concurrency` (default 2)
+  limits how many probes run at once, which matters on slow shares.
+- **Change detection.** A file is re-probed only when its size or mtime
+  changes, or when an earlier probe failed.
+- **Missing files.** A file that disappears is marked `Missing { since }`.
+  It is never deleted, and it is restored if it comes back unchanged.
+- **Unmounted shares.** If the root path is missing, nothing is marked
+  missing (`RootUnavailable`). The same goes for a root that is reachable
+  but contains no video files while the library knows some
+  (`RootLooksUnmounted`).
+- **What gets skipped.** Hidden files and folders, `.reelarr-partial` import
+  temporaries and anything that isn't a video extension. Symlinks are not
+  followed.
+- **Periodic rescans.** `scan::run_periodic` polls each root on its
+  `rescan_interval_secs` (default 6 hours, configurable per root, `None`
+  disables it) until it is told to shut down. Polling is used because
+  inotify-style notifications are unreliable on SMB and NFS. Only one scan
+  per root runs at a time.
+
+## Importing downloads
+
+`import::Importer::import` takes a completed download (`ImportRequest`) and
+returns `Imported`, `Failed { reason, retryable }` or `NoMatch`.
+
+- The movie comes from the request's `movie_id`; without one, a basic
+  title-and-year matcher (`TitleYearMatcher`) is tried. Ambiguous or unknown
+  releases return `NoMatch` for manual import.
+- The largest video at or above `min_video_bytes` is imported. Samples are
+  skipped and output with leftover `.rar`/`.rNN`/`.par2`/`.7z`/`.zip` files is
+  refused as "extraction incomplete".
+- Files are renamed from a template (default
+  `{Title} ({Year})/{Title} ({Year}) [{Quality}]`; tokens `{Title}`, `{Year}`,
+  `{Quality}`, `{TmdbId}`, `{ImdbId}`), with names made safe for Windows and
+  SMB shares.
+- Transfer mode defaults to hardlink, falling back to a verified copy, so the
+  download keeps seeding or stays for the client to clean up. `copy` and
+  `move` are opt-in. An existing library file is never overwritten; copies
+  go through a `.reelarr-partial` file that the scanner ignores.
+- Subtitle sidecars (`.srt`, `.ass`, ...) are carried over with their language
+  suffix.
+- The download folder is never deleted here; cleanup belongs to the download
+  side after `Imported`.

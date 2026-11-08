@@ -2,9 +2,12 @@
 //!
 //! This crate currently provides movie metadata lookup ([`metadata`]), a
 //! storage abstraction for movies ([`store`]) and the service that ties them
-//! together ([`service`]). Scanning and import arrive in later issues.
+//! together ([`service`]), plus library scanning with ffprobe ([`scan`]).
+//! Completed downloads are imported into the library by [`import`].
 
+pub mod import;
 pub mod metadata;
+pub mod scan;
 pub mod service;
 pub mod store;
 
