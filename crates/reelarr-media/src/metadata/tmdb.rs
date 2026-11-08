@@ -112,6 +112,19 @@ impl TmdbProvider {
         image_url(&self.config.image_base, size, path)
     }
 
+    /// Build a transport error that never contains the request URL (which
+    /// carries the v3 `api_key` query parameter) or the credential itself.
+    fn transport_error(&self, err: reqwest::Error) -> MetadataError {
+        let mut message = err.without_url().to_string();
+        let secret = match &self.config.credential {
+            TmdbCredential::ReadAccessToken(s) | TmdbCredential::ApiKey(s) => s,
+        };
+        if !secret.is_empty() {
+            message = message.replace(secret.as_str(), "<redacted>");
+        }
+        MetadataError::Transport(message)
+    }
+
     async fn get<T: for<'de> Deserialize<'de>>(
         &self,
         path: &str,
@@ -130,10 +143,7 @@ impl TmdbProvider {
             TmdbCredential::ApiKey(key) => request.query(&[("api_key", key.as_str())]),
         };
 
-        let response = request
-            .send()
-            .await
-            .map_err(|e| MetadataError::Transport(e.without_url().to_string()))?;
+        let response = request.send().await.map_err(|e| self.transport_error(e))?;
 
         let status = response.status();
         match status {
@@ -159,7 +169,7 @@ impl TmdbProvider {
         let bytes = response
             .bytes()
             .await
-            .map_err(|e| MetadataError::Transport(e.without_url().to_string()))?;
+            .map_err(|e| self.transport_error(e))?;
         serde_json::from_slice(&bytes).map_err(|e| MetadataError::Decode(e.to_string()))
     }
 }

@@ -213,3 +213,40 @@ async fn add_movie_surfaces_not_found_and_stores_nothing() {
     ));
     assert!(service.store().list().await.unwrap().is_empty());
 }
+
+#[tokio::test]
+async fn api_key_never_appears_in_errors() {
+    const SECRET: &str = "supersecretv3key";
+    let server = MockServer::start().await;
+    Mock::given(path("/3/movie/1"))
+        .respond_with(ResponseTemplate::new(500))
+        .mount(&server)
+        .await;
+    Mock::given(path("/3/movie/2"))
+        .respond_with(json("{broken"))
+        .mount(&server)
+        .await;
+    let tmdb = provider(&server, TmdbCredential::detect(SECRET));
+
+    // Nothing listens on this port, so the request fails at the transport layer,
+    // where reqwest errors would normally include the full URL.
+    let mut dead = TmdbConfig::new(TmdbCredential::detect(SECRET));
+    dead.api_base = "http://127.0.0.1:9".into();
+    let dead = TmdbProvider::new(dead).unwrap();
+
+    let errors = vec![
+        tmdb.movie_details(1).await.unwrap_err(),
+        tmdb.movie_details(2).await.unwrap_err(),
+        dead.movie_details(1).await.unwrap_err(),
+        dead.search_movies(&SearchQuery::new("anything"))
+            .await
+            .unwrap_err(),
+    ];
+    assert!(matches!(errors[2], MetadataError::Transport(_)));
+    for err in &errors {
+        for text in [err.to_string(), format!("{err:?}")] {
+            assert!(!text.contains(SECRET), "key leaked in error: {text}");
+        }
+    }
+    assert!(!format!("{tmdb:?}").contains(SECRET));
+}
