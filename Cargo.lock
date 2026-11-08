@@ -2118,8 +2118,12 @@ dependencies = [
  "async-trait",
  "rand_core 0.6.4",
  "reelarr-types",
+ "serde_json",
+ "tempfile",
  "thiserror 2.0.21",
  "tokio",
+ "tracing",
+ "uuid",
 ]
 
 [[package]]
