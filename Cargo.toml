@@ -41,6 +41,7 @@ lib-default-features = false
 site-root = "target/site"
 site-pkg-dir = "pkg"
 style-file = "crates/reelarr-ui/style/main.css"
+assets-dir = "crates/reelarr-ui/public"
 site-addr = "127.0.0.1:7979"
 reload-port = 7980
 env = "DEV"
