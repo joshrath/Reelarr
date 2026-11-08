@@ -7,3 +7,10 @@ license.workspace = true
 repository.workspace = true
 
 [dependencies]
+tokio.workspace = true
+reqwest = { version = "0.13", default-features = false, features = ["rustls", "query"] }
+roxmltree = "0.21"
+httpdate = "1"
+
+[dev-dependencies]
+wiremock = "0.6"
