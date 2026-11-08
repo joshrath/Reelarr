@@ -4,6 +4,7 @@
 //! data. `reelarr-db` will implement [`NzbStore`] in the shared SQLite database.
 //! No subject, group or message ID is interpreted as a filesystem path.
 
+pub mod nntp;
 mod parser;
 mod store;
 
