@@ -1,0 +1,16 @@
+{
+  "adult": false,
+  "backdrop_path": "/backdrop-one.jpg",
+  "budget": 0,
+  "genres": [{ "id": 18, "name": "Drama" }],
+  "id": 1001,
+  "imdb_id": "tt0000001",
+  "original_language": "en",
+  "original_title": "The Example Movie",
+  "overview": "A fixture movie used in Reelarr tests.",
+  "poster_path": "/poster-one.jpg",
+  "release_date": "2004-06-18",
+  "runtime": 112,
+  "status": "Released",
+  "title": "The Example Movie"
+}
