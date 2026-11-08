@@ -1,4 +1,4 @@
-# reelarr-nzb: parser and resume boundary
+# reelarr-nzb: parser, NNTP, yEnc and resume boundary
 
 Clean-room implementation using the public NZB XML structure
 (<https://www.newzbin.com/DTD/nzb/nzb-1.1.dtd>) and XML 1.0 rules;

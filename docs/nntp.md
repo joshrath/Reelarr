@@ -73,4 +73,7 @@ BODY/STAT/QUIT, empty and multiline bodies, raw dot-stuff preservation, typed
 greeting/handshake/hung-body/whole-operation deadlines, a dropped mid-body
 connection, bounded retries/backoff, concurrency/reuse, acquisition timeout,
 cancellation, shutdown/waiter wakeup and credential redaction in errors and
-captured tracing output (including deliberate server credential echoes).
+captured tracing output (including deliberate server credential echoes). An
+additional TLS-to-yEnc integration test verifies exactly-once dot-unstuffing,
+CRC integrity, arbitrary decoder chunking and non-UTF-8 wire data against the
+merged #13 implementation.

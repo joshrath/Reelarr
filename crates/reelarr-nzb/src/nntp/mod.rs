@@ -20,6 +20,22 @@
 //! This is a transport boundary, not a scheduler or persistence layer. Instantiate
 //! one pool per provider; priority/fill selection can later wrap this interface.
 //! There is no pipelining, STARTTLS, SASL, ARTICLE fallback or compression.
+//!
+//! ```no_run
+//! use reelarr_nzb::{Segment, nntp::{Credentials, Error, Pool, Secret, ServerConfig}};
+//!
+//! async fn retrieve(segment: &Segment, username: Secret, password: Secret) -> Result<(), Error> {
+//!     let mut config = ServerConfig::new("news.example.org");
+//!     config.credentials = Some(Credentials { username, password });
+//!     let pool = Pool::new(config)?; // Load native roots once, during setup.
+//!     let body = pool.body(segment).await?;
+//!     // The worker feeds body.as_bytes() to yEnc with BodyEncoding::DotStuffed.
+//!     // Do not log the body, credentials, original secret strings or wire replies.
+//!     let _wire_bytes = body.into_bytes();
+//!     pool.shutdown().await;
+//!     Ok(())
+//! }
+//! ```
 
 mod config;
 mod connection;
