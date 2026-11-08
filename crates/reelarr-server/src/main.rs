@@ -1,24 +1,7 @@
 use std::{net::SocketAddr, path::PathBuf};
 
-mod api;
-mod state;
-
 use reelarr_db::Database;
-use state::AppState;
-
-use axum::{Json, Router, routing::get};
-use reelarr_types::Health;
-
-fn app(state: AppState) -> Router {
-    Router::new()
-        .route("/health", get(health))
-        .nest("/api/v1", api::router())
-        .with_state(state)
-}
-
-async fn health() -> Json<Health> {
-    Json(Health::ok())
-}
+use reelarr_server::{app, state::AppState};
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -30,7 +13,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     tokio::fs::create_dir_all(&data_dir).await?;
     // Connecting applies migrations; errors return before any socket is bound.
     let db = Database::connect(data_dir.join("reelarr.db")).await?;
-    let state = AppState { db };
+    let state = AppState::new(db);
     tracing::debug!(connections = state.db.pool().size(), "Database initialized");
 
     let port: u16 = std::env::var("REELARR_PORT")
@@ -59,13 +42,13 @@ mod tests {
         let db = Database::connect(dir.path().join("reelarr.db"))
             .await
             .unwrap();
-        let res = app(AppState { db })
+        let res = app(AppState::new(db))
             .oneshot(Request::get("/health").body(Body::empty()).unwrap())
             .await
             .unwrap();
         assert!(res.status().is_success());
         let body = res.into_body().collect().await.unwrap().to_bytes();
-        let health: Health = serde_json::from_slice(&body).unwrap();
+        let health: reelarr_types::Health = serde_json::from_slice(&body).unwrap();
         assert_eq!(health.status, "ok");
     }
 }

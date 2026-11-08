@@ -1,8 +1,10 @@
-use axum::Router;
+use crate::{auth, state::AppState};
+use axum::{Router, middleware};
 
-use crate::state::AppState;
-
-/// Versioned JSON API; feature modules attach their routes here.
-pub fn router() -> Router<AppState> {
-    Router::new()
+/// Authentication endpoints stay public; domain routes require a valid session.
+pub fn router(state: AppState) -> Router<AppState> {
+    let protected = Router::new()
+        .fallback(|| async { axum::http::StatusCode::NOT_FOUND })
+        .layer(middleware::from_fn_with_state(state, auth::require_auth));
+    auth::router().merge(protected)
 }
