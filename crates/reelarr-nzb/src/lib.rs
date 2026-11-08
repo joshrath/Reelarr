@@ -13,10 +13,8 @@ pub mod yenc;
 pub use parser::{ParseError, ParseLimits, parse};
 pub use store::{InMemoryNzbStore, NzbStore, ResumePlan, SegmentKey, StoreError, StoredNzb};
 
-/// Temporary opaque job identifier, supplied by the caller (not generated here).
-/// TODO: replace with `reelarr_core::JobId` once the core lifecycle PR lands.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
-pub struct JobId(pub u128);
+/// Job identifier owned by `reelarr-core` (UUIDv7), supplied by the caller.
+pub use reelarr_core::jobs::JobId;
 
 /// Parsed NZB metadata and file list. Metadata may contain secrets (passwords);
 /// do not log or expose the document to the UI indiscriminately.

@@ -11,7 +11,10 @@ name = "reelarr"
 path = "src/main.rs"
 
 [dependencies]
+reelarr-db = { path = "../reelarr-db" }
 reelarr-types = { path = "../reelarr-types" }
+reelarr-ui = { path = "../reelarr-ui", features = ["ssr"] }
+leptos = { workspace = true, features = ["ssr"] }
 axum = { workspace = true }
 tokio = { workspace = true }
 tracing = { workspace = true }
@@ -20,6 +23,8 @@ reelarr-core = { path = "../reelarr-core" }
 subtle = "2"
 
 [dev-dependencies]
+sqlx = { workspace = true }
+tempfile = { workspace = true }
 tower = { workspace = true }
 http-body-util = { workspace = true }
 serde_json = { workspace = true }
