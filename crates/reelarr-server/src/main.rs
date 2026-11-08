@@ -1,10 +1,19 @@
-use std::net::SocketAddr;
+use std::{net::SocketAddr, path::PathBuf};
+
+mod api;
+mod state;
+
+use reelarr_db::Database;
+use state::AppState;
 
 use axum::{Json, Router, routing::get};
 use reelarr_types::Health;
 
-fn app() -> Router {
-    Router::new().route("/health", get(health))
+fn app(state: AppState) -> Router {
+    Router::new()
+        .route("/health", get(health))
+        .nest("/api/v1", api::router())
+        .with_state(state)
 }
 
 async fn health() -> Json<Health> {
@@ -12,8 +21,17 @@ async fn health() -> Json<Health> {
 }
 
 #[tokio::main]
-async fn main() {
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
     tracing_subscriber::fmt::init();
+
+    let data_dir = std::env::var_os("REELARR_DATA_DIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from("/config"));
+    tokio::fs::create_dir_all(&data_dir).await?;
+    // Connecting applies migrations; errors return before any socket is bound.
+    let db = Database::connect(data_dir.join("reelarr.db")).await?;
+    let state = AppState { db };
+    tracing::debug!(connections = state.db.pool().size(), "Database initialized");
 
     let port: u16 = std::env::var("REELARR_PORT")
         .ok()
@@ -24,7 +42,8 @@ async fn main() {
         .await
         .expect("failed to bind port");
     tracing::info!("Reelarr listening on {addr}");
-    axum::serve(listener, app()).await.expect("server error");
+    axum::serve(listener, app(state)).await?;
+    Ok(())
 }
 
 #[cfg(test)]
@@ -36,7 +55,11 @@ mod tests {
 
     #[tokio::test]
     async fn health_returns_ok() {
-        let res = app()
+        let dir = tempfile::tempdir().unwrap();
+        let db = Database::connect(dir.path().join("reelarr.db"))
+            .await
+            .unwrap();
+        let res = app(AppState { db })
             .oneshot(Request::get("/health").body(Body::empty()).unwrap())
             .await
             .unwrap();
