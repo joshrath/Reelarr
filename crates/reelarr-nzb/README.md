@@ -25,9 +25,9 @@ have no Debug implementation; do not log or serialize them indiscriminately.
 ## Lifecycle and persistence integration
 
 Core owns jobs, states, ordering, events and scheduling. This crate defines no
-job state machine. `JobId(u128)` is a temporary opaque bridge: replace it with
-`reelarr-core::JobId` after Core Lead's lifecycle PR lands. No ID generation is
-performed here.
+job state machine. Jobs are identified by `reelarr_core::JobId` (UUIDv7, re-exported
+as `reelarr_nzb::JobId`), supplied by the caller. No ID generation is performed
+here.
 
 `NzbStore` is an async, Send-future, statically dispatched storage boundary.
 `reelarr-db` must implement it in the single shared SQLite database, including

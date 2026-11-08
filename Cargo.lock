@@ -2411,6 +2411,7 @@ version = "0.0.1"
 dependencies = [
  "crc32fast",
  "quick-xml",
+ "reelarr-core",
  "thiserror 2.0.21",
  "tokio",
 ]

@@ -180,7 +180,7 @@ fn chunked_read_and_io_error() {
 #[tokio::test]
 async fn store_roundtrip_and_worker_restart_resume() {
     let backend = InMemoryNzbStore::default();
-    let id = JobId(1);
+    let id = JobId::new();
     assert!(backend.load(id).await.unwrap().is_none());
     let doc = read(VALID).unwrap();
     backend.insert(id, doc.clone()).await.unwrap();
@@ -230,7 +230,8 @@ async fn store_roundtrip_and_worker_restart_resume() {
 #[tokio::test]
 async fn invalid_batches_are_atomic_and_jobs_isolated() {
     let store = InMemoryNzbStore::default();
-    for id in [JobId(1), JobId(2)] {
+    let [j1, j2, j3, j4] = [JobId::new(), JobId::new(), JobId::new(), JobId::new()];
+    for id in [j1, j2] {
         store.insert(id, read(VALID).unwrap()).await.unwrap();
     }
     let valid = SegmentKey {
@@ -252,15 +253,13 @@ async fn invalid_batches_are_atomic_and_jobs_isolated() {
         },
     ] {
         assert!(matches!(
-            store
-                .checkpoint(JobId(1), &[(valid, true), (bad, true)])
-                .await,
+            store.checkpoint(j1, &[(valid, true), (bad, true)]).await,
             Err(StoreError::UnknownSegment(_))
         ));
     }
     assert_eq!(
         store
-            .load(JobId(1))
+            .load(j1)
             .await
             .unwrap()
             .unwrap()
@@ -269,10 +268,10 @@ async fn invalid_batches_are_atomic_and_jobs_isolated() {
             .bytes_done,
         0
     );
-    store.checkpoint(JobId(1), &[(valid, true)]).await.unwrap();
+    store.checkpoint(j1, &[(valid, true)]).await.unwrap();
     assert_eq!(
         store
-            .load(JobId(2))
+            .load(j2)
             .await
             .unwrap()
             .unwrap()
@@ -282,11 +281,11 @@ async fn invalid_batches_are_atomic_and_jobs_isolated() {
         0
     );
     assert!(matches!(
-        store.checkpoint(JobId(3), &[]).await,
+        store.checkpoint(j3, &[]).await,
         Err(StoreError::NotFound)
     ));
-    assert!(store.insert(JobId(4), Default::default()).await.is_err());
-    let mut corrupted = store.load(JobId(1)).await.unwrap().unwrap();
+    assert!(store.insert(j4, Default::default()).await.is_err());
+    let mut corrupted = store.load(j1).await.unwrap().unwrap();
     corrupted.completed.insert(SegmentKey {
         file_index: 90,
         number: 1,
