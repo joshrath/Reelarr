@@ -1,0 +1,41 @@
+{
+  "page": 1,
+  "results": [
+    {
+      "adult": false,
+      "backdrop_path": "/backdrop-one.jpg",
+      "id": 1001,
+      "original_language": "en",
+      "original_title": "The Example Movie",
+      "overview": "A fixture movie used in Reelarr tests.",
+      "popularity": 12.5,
+      "poster_path": "/poster-one.jpg",
+      "release_date": "2004-06-18",
+      "title": "The Example Movie",
+      "video": false,
+      "vote_average": 7.1,
+      "vote_count": 321
+    },
+    {
+      "adult": false,
+      "backdrop_path": null,
+      "id": 1002,
+      "original_language": "fr",
+      "original_title": "Le Film Exemple",
+      "overview": "",
+      "popularity": 1.0,
+      "poster_path": null,
+      "release_date": "",
+      "title": "The Example Movie Returns",
+      "video": false,
+      "vote_average": 0,
+      "vote_count": 0
+    },
+    {
+      "id": 1003,
+      "title": ""
+    }
+  ],
+  "total_pages": 1,
+  "total_results": 3
+}
