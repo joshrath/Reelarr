@@ -1,0 +1,1 @@
+<!DOCTYPE nzb [<!ENTITY secret SYSTEM "https://example.test/private">]><nzb><head><meta type="password">&secret;</meta></head></nzb>

@@ -7,3 +7,8 @@ license.workspace = true
 repository.workspace = true
 
 [dependencies]
+quick-xml = "0.42"
+thiserror = "2"
+
+[dev-dependencies]
+tokio.workspace = true

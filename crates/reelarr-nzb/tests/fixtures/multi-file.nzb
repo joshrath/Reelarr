@@ -1,0 +1,20 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<nzb xmlns="http://www.newzbin.com/DTD/2003/nzb">
+  <head>
+    <meta type="title">映画 🎬 &amp; café</meta>
+    <meta type="password">p&amp;ss&#x2713;</meta>
+    <meta type="category">movies</meta>
+    <meta type="ignored">bounded extension</meta>
+  </head>
+  <file poster="author@example.test" date="1700000000" subject="映画 &quot;part 1&quot;">
+    <groups><group>alt.binaries.example</group><group>alt.example</group></groups>
+    <segments>
+      <segment bytes="20" number="2">part2@example.test</segment>
+      <segment bytes="10" number="1">part1@example.test</segment>
+    </segments>
+  </file>
+  <file poster="other@example.test" date="1700000001" subject="second file">
+    <groups><group>alt.example</group></groups>
+    <segments><segment bytes="30" number="1"><![CDATA[part3@example.test]]></segment></segments>
+  </file>
+</nzb>
