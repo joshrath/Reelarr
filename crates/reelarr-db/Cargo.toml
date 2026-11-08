@@ -7,3 +7,11 @@ license.workspace = true
 repository.workspace = true
 
 [dependencies]
+reelarr-core = { path = "../reelarr-core" }
+async-trait = { workspace = true }
+thiserror = { workspace = true }
+sqlx = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
+tokio = { workspace = true }

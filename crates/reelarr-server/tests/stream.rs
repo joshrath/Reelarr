@@ -91,7 +91,7 @@ fn stream(kind: StreamKind, codec: &str) -> MediaStream {
     }
 }
 
-fn setup() -> (tempfile::TempDir, Router) {
+async fn setup() -> (tempfile::TempDir, Router) {
     let tmp = tempfile::tempdir().unwrap();
     let root = tmp.path().to_owned();
     std::fs::write(root.join("a.mp4"), b"0123456789").unwrap();
@@ -118,16 +118,14 @@ fn setup() -> (tempfile::TempDir, Router) {
         root,
         probe: Some(probe("hevc")),
     });
-    let state = AppState {
-        media: lookup,
-        ..AppState::default()
-    };
+    let mut state = AppState::new(reelarr_db::Database::connect(":memory:").await.unwrap());
+    state.media = lookup;
     (tmp, app(state))
 }
 
 #[tokio::test]
 async fn playback_routes_require_a_session() {
-    let (_tmp, app) = setup();
+    let (_tmp, app) = setup().await;
     for uri in ["/api/v1/media/1/stream", "/api/v1/media/1/playback"] {
         let resp = call(&app, "GET", uri, "", &[], "").await;
         assert_eq!(resp.status(), StatusCode::UNAUTHORIZED, "{uri}");
@@ -136,7 +134,7 @@ async fn playback_routes_require_a_session() {
 
 #[tokio::test]
 async fn signed_in_user_can_range_stream() {
-    let (_tmp, app) = setup();
+    let (_tmp, app) = setup().await;
     let cookie = sign_in(&app).await;
     let resp = call(
         &app,
@@ -157,7 +155,7 @@ async fn signed_in_user_can_range_stream() {
 
 #[tokio::test]
 async fn playback_info_depends_on_browser() {
-    let (_tmp, app) = setup();
+    let (_tmp, app) = setup().await;
     let cookie = sign_in(&app).await;
     let info = |id: i64, ua: &'static str| {
         let (app, cookie) = (app.clone(), cookie.clone());
