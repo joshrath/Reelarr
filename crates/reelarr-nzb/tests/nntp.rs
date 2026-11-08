@@ -733,3 +733,34 @@ async fn credentials_and_server_echoes_never_escape_diagnostics_or_trace() {
     }
     mock.assert_healthy();
 }
+
+#[tokio::test]
+async fn tls_body_feeds_yenc_with_exactly_one_dot_unstuff() {
+    use reelarr_nzb::yenc::{BodyEncoding, DecodeLimits, Decoder};
+    // Decoded 0x04 becomes encoded '.', requiring wire '..'. 0xd6 becomes
+    // encoded 0x00 and must be escaped; include an ordinary non-UTF-8 byte too.
+    let decoded = [4_u8, 214, 128];
+    let mut body = b"=ybegin line=128 size=3 name=transport.bin\r\n..=\x40\xaa\r\n".to_vec();
+    body.extend_from_slice(
+        format!("=yend size=3 crc32={:08x}\r\n", crc32fast::hash(&decoded)).as_bytes(),
+    );
+    let mock = Mock::start(Options {
+        replies: vec![Reply::Body(body.clone())],
+        ..Options::default()
+    })
+    .await;
+    let article = mock.pool(mock.config()).body(&segment()).await.unwrap();
+    assert_eq!(article.as_bytes(), body);
+    let mut decoder = Decoder::new(
+        Vec::new(),
+        DecodeLimits::default(),
+        BodyEncoding::DotStuffed,
+    );
+    // Fragment independently of TLS records and physical NNTP lines.
+    for chunk in article.as_bytes().chunks(3) {
+        decoder.push(chunk).unwrap();
+    }
+    let (output, _) = decoder.finish().unwrap();
+    assert_eq!(output, decoded);
+    mock.assert_healthy();
+}

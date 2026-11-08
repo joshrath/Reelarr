@@ -49,10 +49,11 @@ encoded article bytes done/total (not decoded media bytes).
 Exact versions verified through `cargo info`, package manifests and bundled
 license files: quick-xml 0.42.0 (MIT), thiserror 2.0.21 and its derive helper
 (MIT OR Apache-2.0). quick-xml's memchr dependency is 2.8.3 (MIT OR Unlicense).
-Tokio 1.54.1 is an existing workspace dependency (MIT), used here only in tests.
+Tokio 1.54.1 is an existing workspace dependency (MIT), also used by NNTP.
 The derive graph reuses proc-macro2/quote/syn/unicode-ident already in the lockfile
 (MIT OR Apache-2.0; unicode-ident additionally requires Unicode-3.0). These license options
-are compatible with GPL-3.0-or-later. No new native, network or database dependency.
+are compatible with GPL-3.0-or-later. The parser alone adds no network/database
+dependency; NNTP dependencies are documented below.
 
 Run `cargo fmt --all`, `cargo clippy --workspace --all-targets -- -D warnings`
 and `cargo test --workspace` from the workspace root.
@@ -123,3 +124,66 @@ network access are needed for tests.
 
 See [the NNTP source/license ledger](../../docs/nntp.md) for provenance and
 resolved dependency licenses.
+
+## Streaming yEnc and disk assembly (#13)
+
+`yenc::Decoder<W: Write>` accepts arbitrary byte chunks with `push` and requires
+`finish` before output is trusted. It buffers at most one encoded line plus a
+decoded line, preserves chunk-split escapes, accepts CRLF/LF, and rejects a
+dangling escape at a physical line boundary. `BodyEncoding` explicitly selects
+wire dot-stuffing or already-unstuffed BODY input, preventing double unstuffing.
+Supply only one attachment per decoder; surrounding prose is ignored but counted
+against the input/line caps. UTF-8 filenames are required; legacy non-UTF-8 names
+are unsupported and fail clearly. Safe names with spaces are supported.
+
+Default `DecodeLimits`: 8192 physical line bytes, 128 MiB article input, 64 MiB
+decoded part, 1 TiB logical file. These are configurable *ceilings*, not quotas:
+production workers must lower them to their disk budget, bound concurrent jobs,
+and impose network deadlines in #12. An escape pair may make a data line one
+byte longer than its advertised `line`; wire dot-stuffing and CR count against
+the independent physical line cap. CRC32 is corruption detection, not security.
+Single-part checksums are optional under the spec; multipart `pcrc32` is required.
+Every advertised checksum is verified, including whole-file CRC in disk order.
+The completion receipt explicitly reports when no whole-file checksum was given.
+
+`assembly::Assembler::new(job_dir, &NzbFile, limits)` reuses the parsed segment
+list, decodes each article to one temporary disk file, then copies validated
+bytes to the declared offset in a sparse output. Overlap checks use ordered
+interval neighbors (not quadratic scans); metadata scales only with the capped
+NZB segment count. Missing numbers and holes prevent `finish`. A corrupt part
+may be retried without checkpointing it. Conflicting filenames, sizes, counts,
+part numbers or whole-file CRC declarations are rejected. NZB `Segment::bytes`
+is an encoded article estimate and is deliberately not treated as decoded size.
+
+The caller must supply a private job directory and keep it free of concurrent
+untrusted filesystem mutation. A fresh mode-0700 child directory and `create_new`
+files prevent pre-existing symlinks/files from being followed or overwritten;
+unsafe basenames are rejected, not rewritten. `.stage` is additionally reserved
+for internal temporary storage. Output is retained at `<job>/<private>/<name>`;
+the job owns cleanup after import. Ordinary failure/drop removes unfinished
+files best-effort; process crashes can leave artifacts for recovery to reconcile.
+Directory fsync currently targets Unix/Linux (the Docker target).
+
+Assembly is blocking: run the **entire** assembler operation in
+`tokio::task::spawn_blocking` behind the worker's concurrency limit. After
+`finish` fsyncs the output and directory entries, `CompletedFile::checkpoint`
+can mark all matching `NzbStore` segments in one atomic batch. Partial progress
+is exposed in memory, but is deliberately not durably checkpointed by this API;
+crash-safe per-part reconciliation/rehydration remains a worker integration task.
+There is no separate state database/file, NNTP connection, or core event policy.
+
+### Clean-room source / fixture ledger
+
+- Specification: Juergen Helbing, **yEncode 1.3 draft**, 2002-03-05
+  (<http://www.yenc.org/yenc-draft.1.3.txt>), read via its public protocol-text
+  mirror <https://yence.sourceforge.net/docs/protocol/version1_3_draft.html>.
+  The canonical site was unavailable during implementation. Only the protocol
+  document informed the implementation; no reference-app/codec source was used.
+- All yEnc vectors originate from the tiny test-only encoder in `tests/yenc.rs`,
+  independently written from the spec's +42 / escape +64 arithmetic. No imported
+  fixtures, binaries, proprietary encoders or third-party source translations.
+- New dependency: **crc32fast 1.5.4, MIT OR Apache-2.0**, verified by `cargo info`
+  and its distributed manifest/licenses. It uses existing **cfg-if 1.0.5,
+  MIT OR Apache-2.0**. Both license options are GPL-3.0-or-later compatible.
+  No new testing dependency: deterministic seeded round trips and mutation tests
+  provide fuzz-style coverage without adding proptest.
