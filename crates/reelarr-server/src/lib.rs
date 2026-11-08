@@ -2,6 +2,7 @@
 pub mod api;
 pub mod auth;
 pub mod state;
+pub mod stream;
 
 use axum::{Json, Router, routing::get};
 use leptos::config::{LeptosOptions, get_configuration};

@@ -4,6 +4,7 @@ use serde::{Deserialize, Serialize};
 
 pub mod job;
 pub mod movie;
+pub mod playback;
 pub use job::{JobEvent, JobEventKind, JobState, Progress};
 
 pub use movie::{
@@ -11,6 +12,7 @@ pub use movie::{
     LibraryRootKind, MediaFile, MediaFileId, MediaFileStatus, MediaProbe, MediaStream, Movie,
     MovieId, MovieMetadata, MovieSearchResult, StreamKind,
 };
+pub use playback::{PlaybackInfo, PlaybackMethod, UnsupportedKind, UnsupportedReason};
 
 /// Response body for the `/health` endpoint.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
