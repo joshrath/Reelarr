@@ -3,8 +3,6 @@ use axum::{Router, middleware};
 
 /// Authentication endpoints stay public; domain routes require a valid session.
 pub fn router(state: AppState) -> Router<AppState> {
-    let protected = Router::new()
-        .fallback(|| async { axum::http::StatusCode::NOT_FOUND })
-        .layer(middleware::from_fn_with_state(state, auth::require_auth));
+    let protected = Router::new().layer(middleware::from_fn_with_state(state, auth::require_auth));
     auth::router().merge(protected)
 }

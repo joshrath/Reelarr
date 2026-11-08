@@ -16,6 +16,18 @@ Third-party crates are welcome as long as their licenses are compatible with GPL
    ```sh
    cargo fmt --all
    cargo clippy --workspace --all-targets -- -D warnings
+   cargo clippy -p reelarr-ui --lib --target wasm32-unknown-unknown --features hydrate -- -D warnings
    cargo test --workspace
    ```
 4. By contributing, you agree your work is licensed under GPL-3.0-or-later.
+
+## Web UI (`reelarr-ui`)
+
+The UI is written in Rust with [Leptos](https://leptos.dev). No React, and no JavaScript beyond what Leptos generates (a minimal hls.js loader for the video player will be the one exception).
+
+- `ssr` feature: native build, used by `reelarr-server` to render pages. The crate exposes `reelarr_ui::router(options)`, which the server merges into its axum router.
+- `hydrate` feature: `wasm32-unknown-unknown` build that `cargo leptos` turns into `/pkg/reelarr.{js,wasm}` and that hydrates the server-rendered HTML.
+- Styles are plain CSS with design tokens in `crates/reelarr-ui/style/main.css`, served as `/pkg/reelarr.css`.
+- Routing: `/health` and `/api/v1/*` belong to the server. Leptos server functions, if added, go under `/api/v1/fn/`. Everything else falls back to the UI, except unknown `/api/*` paths, which return a JSON 404.
+
+Run `cargo leptos watch` for a live-reloading dev server.

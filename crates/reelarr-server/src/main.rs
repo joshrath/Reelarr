@@ -1,7 +1,7 @@
 use std::{net::SocketAddr, path::PathBuf};
 
 use reelarr_db::Database;
-use reelarr_server::{app, state::AppState};
+use reelarr_server::{app_with_ui, leptos_options, state::AppState};
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -25,7 +25,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .await
         .expect("failed to bind port");
     tracing::info!("Reelarr listening on {addr}");
-    axum::serve(listener, app(state)).await?;
+    axum::serve(listener, app_with_ui(state, leptos_options())).await?;
     Ok(())
 }
 
@@ -42,7 +42,7 @@ mod tests {
         let db = Database::connect(dir.path().join("reelarr.db"))
             .await
             .unwrap();
-        let res = app(AppState::new(db))
+        let res = reelarr_server::app(AppState::new(db))
             .oneshot(Request::get("/health").body(Body::empty()).unwrap())
             .await
             .unwrap();

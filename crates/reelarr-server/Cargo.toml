@@ -13,6 +13,8 @@ path = "src/main.rs"
 [dependencies]
 reelarr-db = { path = "../reelarr-db" }
 reelarr-types = { path = "../reelarr-types" }
+reelarr-ui = { path = "../reelarr-ui", features = ["ssr"] }
+leptos = { workspace = true, features = ["ssr"] }
 axum = { workspace = true }
 tokio = { workspace = true }
 tracing = { workspace = true }
