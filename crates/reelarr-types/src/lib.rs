@@ -2,6 +2,12 @@
 
 use serde::{Deserialize, Serialize};
 
+pub mod movie;
+
+pub use movie::{
+    Artwork, ExternalIds, MediaFile, MediaFileId, Movie, MovieId, MovieMetadata, MovieSearchResult,
+};
+
 /// Response body for the `/health` endpoint.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Health {
