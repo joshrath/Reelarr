@@ -17,9 +17,11 @@ tokio = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 reelarr-core = { path = "../reelarr-core" }
+reelarr-stream = { path = "../reelarr-stream" }
 subtle = "2"
 
 [dev-dependencies]
+tempfile = "3"
 tower = { workspace = true }
 http-body-util = { workspace = true }
 serde_json = { workspace = true }

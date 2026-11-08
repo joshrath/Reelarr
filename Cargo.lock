@@ -1824,10 +1824,12 @@ dependencies = [
  "axum",
  "http-body-util",
  "reelarr-core",
+ "reelarr-stream",
  "reelarr-types",
  "serde",
  "serde_json",
  "subtle",
+ "tempfile",
  "tokio",
  "tower",
  "tracing",
@@ -1837,6 +1839,18 @@ dependencies = [
 [[package]]
 name = "reelarr-stream"
 version = "0.0.1"
+dependencies = [
+ "axum",
+ "http-body-util",
+ "httpdate",
+ "reelarr-types",
+ "tempfile",
+ "thiserror 2.0.21",
+ "tokio",
+ "tokio-util",
+ "tower",
+ "tracing",
+]
 
 [[package]]
 name = "reelarr-types"

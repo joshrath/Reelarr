@@ -3,12 +3,14 @@
 use serde::{Deserialize, Serialize};
 
 pub mod movie;
+pub mod playback;
 
 pub use movie::{
     Artwork, DEFAULT_RESCAN_INTERVAL_SECS, ExternalIds, LibraryRoot, LibraryRootId,
     LibraryRootKind, MediaFile, MediaFileId, MediaFileStatus, MediaProbe, MediaStream, Movie,
     MovieId, MovieMetadata, MovieSearchResult, StreamKind,
 };
+pub use playback::{PlaybackInfo, PlaybackMethod, UnsupportedKind, UnsupportedReason};
 
 /// Response body for the `/health` endpoint.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
