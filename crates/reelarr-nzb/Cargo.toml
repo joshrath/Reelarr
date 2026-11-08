@@ -8,6 +8,7 @@ repository.workspace = true
 
 [dependencies]
 quick-xml = "0.42"
+crc32fast = "1.5"
 thiserror = "2"
 
 [dev-dependencies]
