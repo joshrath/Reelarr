@@ -3,15 +3,16 @@
 
 use std::collections::BTreeMap;
 use std::future::Future;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
-use reelarr_types::{LibraryRootId, MediaFile, MediaFileId, MediaFileStatus, MediaProbe};
+use reelarr_types::{LibraryRootId, MediaFile, MediaFileId, MediaFileStatus, MediaProbe, MovieId};
 
 use crate::store::StoreError;
 
 /// A file to add to the store.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NewMediaFile {
+    pub movie_id: Option<MovieId>,
     pub root_id: LibraryRootId,
     pub path: String,
     pub size_bytes: u64,
@@ -34,6 +35,11 @@ pub trait MediaFileStore: Send + Sync {
     fn get(
         &self,
         id: MediaFileId,
+    ) -> impl Future<Output = Result<Option<MediaFile>, StoreError>> + Send;
+
+    fn get_by_path(
+        &self,
+        path: &str,
     ) -> impl Future<Output = Result<Option<MediaFile>, StoreError>> + Send;
 
     /// All files under a root, in any status.
@@ -75,7 +81,7 @@ impl MediaFileStore for InMemoryMediaFileStore {
         guard.0 += 1;
         let stored = MediaFile {
             id: MediaFileId(guard.0),
-            movie_id: None,
+            movie_id: file.movie_id,
             root_id: file.root_id,
             path: file.path,
             size_bytes: file.size_bytes,
@@ -105,6 +111,10 @@ impl MediaFileStore for InMemoryMediaFileStore {
         Ok(self.lock()?.1.get(&id).cloned())
     }
 
+    async fn get_by_path(&self, path: &str) -> Result<Option<MediaFile>, StoreError> {
+        Ok(self.lock()?.1.values().find(|f| f.path == path).cloned())
+    }
+
     async fn list_by_root(&self, root_id: LibraryRootId) -> Result<Vec<MediaFile>, StoreError> {
         Ok(self
             .lock()?
@@ -113,5 +123,39 @@ impl MediaFileStore for InMemoryMediaFileStore {
             .filter(|f| f.root_id == root_id)
             .cloned()
             .collect())
+    }
+}
+
+impl<T: MediaFileStore> MediaFileStore for Arc<T> {
+    fn insert(
+        &self,
+        file: NewMediaFile,
+    ) -> impl Future<Output = Result<MediaFile, StoreError>> + Send {
+        (**self).insert(file)
+    }
+
+    fn update(&self, file: &MediaFile) -> impl Future<Output = Result<(), StoreError>> + Send {
+        (**self).update(file)
+    }
+
+    fn get(
+        &self,
+        id: MediaFileId,
+    ) -> impl Future<Output = Result<Option<MediaFile>, StoreError>> + Send {
+        (**self).get(id)
+    }
+
+    fn get_by_path(
+        &self,
+        path: &str,
+    ) -> impl Future<Output = Result<Option<MediaFile>, StoreError>> + Send {
+        (**self).get_by_path(path)
+    }
+
+    fn list_by_root(
+        &self,
+        root_id: LibraryRootId,
+    ) -> impl Future<Output = Result<Vec<MediaFile>, StoreError>> + Send {
+        (**self).list_by_root(root_id)
     }
 }

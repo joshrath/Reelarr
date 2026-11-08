@@ -227,6 +227,7 @@ impl<P: Prober, S: MediaFileStore> Scanner<P, S> {
                 None => {
                     self.store
                         .insert(NewMediaFile {
+                            movie_id: None,
                             root_id: root.id,
                             path,
                             size_bytes: file.size_bytes,
