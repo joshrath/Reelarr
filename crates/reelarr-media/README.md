@@ -34,8 +34,12 @@ and [developer FAQ](https://developer.themoviedb.org/docs/faq):
 - Free use is for non-commercial purposes. Commercial use needs a separate
   agreement with TMDB.
 - Apps must show the TMDB logo, less prominent than the app's own branding,
-  and this notice: "This product uses the TMDB API but is not endorsed or
-  certified by TMDB." This is tracked for the UI in #19.
+  and place this notice prominently: "This application uses TMDB and the TMDB
+  APIs but is not endorsed, certified, or otherwise approved by TMDB." This is
+  tracked for the UI in #19.
+- TMDB content may not be used with machine-learning or AI applications, and
+  apps must not use excessive bandwidth or imply that TMDB is their source of
+  origin.
 - TMDB data may not be cached for more than six months, and must be deleted
   if API access ends. `Movie::metadata_fetched_at` records when data was
   fetched, and refresh and purge are tracked in #20.
