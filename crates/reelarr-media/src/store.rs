@@ -6,7 +6,7 @@
 
 use std::collections::BTreeMap;
 use std::future::Future;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
 use reelarr_types::{Movie, MovieId, MovieMetadata};
 
@@ -105,5 +105,30 @@ impl MovieStore for InMemoryMovieStore {
 
     async fn list(&self) -> Result<Vec<Movie>, StoreError> {
         Ok(self.lock()?.movies.values().cloned().collect())
+    }
+}
+
+impl<T: MovieStore> MovieStore for Arc<T> {
+    fn insert(
+        &self,
+        metadata: MovieMetadata,
+        fetched_at: i64,
+    ) -> impl Future<Output = Result<Movie, StoreError>> + Send {
+        (**self).insert(metadata, fetched_at)
+    }
+
+    fn get(&self, id: MovieId) -> impl Future<Output = Result<Option<Movie>, StoreError>> + Send {
+        (**self).get(id)
+    }
+
+    fn find_by_tmdb_id(
+        &self,
+        tmdb_id: u64,
+    ) -> impl Future<Output = Result<Option<Movie>, StoreError>> + Send {
+        (**self).find_by_tmdb_id(tmdb_id)
+    }
+
+    fn list(&self) -> impl Future<Output = Result<Vec<Movie>, StoreError>> + Send {
+        (**self).list()
     }
 }
