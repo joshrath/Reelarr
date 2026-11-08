@@ -1,0 +1,9 @@
+[package]
+name = "reelarr-media"
+description = "Library scanning, import, rename and metadata"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]

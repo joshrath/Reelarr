@@ -1,0 +1,10 @@
+[package]
+name = "reelarr-types"
+description = "Shared types between the server and the UI"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+serde = { workspace = true }

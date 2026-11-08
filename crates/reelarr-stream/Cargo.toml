@@ -1,0 +1,9 @@
+[package]
+name = "reelarr-stream"
+description = "Playback: direct play and FFmpeg transcoding"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]

@@ -1,0 +1,9 @@
+[package]
+name = "reelarr-nzb"
+description = "Built-in NZB download client (NNTP, yEnc, repair, extract)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]

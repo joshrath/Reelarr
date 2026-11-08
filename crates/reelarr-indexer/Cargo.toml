@@ -1,0 +1,9 @@
+[package]
+name = "reelarr-indexer"
+description = "Newznab/Torznab indexer clients and search"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]

@@ -1,0 +1,9 @@
+[package]
+name = "reelarr-parser"
+description = "Release-name parsing and quality detection"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]

@@ -1,0 +1,9 @@
+[package]
+name = "reelarr-db"
+description = "Persistence layer (sqlx + SQLite)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]

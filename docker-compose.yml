@@ -1,0 +1,11 @@
+services:
+  reelarr:
+    build: .
+    container_name: reelarr
+    ports:
+      - "7979:7979"
+    volumes:
+      - ./data/config:/config
+      - /path/to/media:/media
+      - /path/to/downloads:/downloads
+    restart: unless-stopped

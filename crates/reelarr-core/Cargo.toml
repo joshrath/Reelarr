@@ -1,0 +1,9 @@
+[package]
+name = "reelarr-core"
+description = "Domain logic: movies, series, quality profiles, decisions"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
