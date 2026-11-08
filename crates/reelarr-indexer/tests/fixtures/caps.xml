@@ -1,0 +1,6 @@
+<?xml version="1.0"?>
+<!-- Independently authored protocol fixture, not copied from any application. -->
+<caps><limits default="2" max="4"/><searching>
+<search available="yes" supportedParams="q,cat,limit,offset"/>
+<movie-search available="yes" supportedParams="q,imdbid,tmdbid,cat,limit,offset"/>
+</searching><categories><category id="2000" name="Movies"><subcat id="2040" name="HD"/></category></categories></caps>
