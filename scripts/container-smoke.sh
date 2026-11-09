@@ -10,7 +10,7 @@ work=$(mktemp -d)
 cleanup() {
     status=$?
     if (( status != 0 )); then docker logs "$name" >&2 || true; fi
-    docker rm -fv "$name" "$name-default" "$name-bad" >/dev/null 2>&1 || true
+    docker rm -fv "$name" "$name-default" "$name-bad" "$name-extra" >/dev/null 2>&1 || true
     docker volume rm "$volume" "$media_volume" >/dev/null 2>&1 || true
     rm -rf "$work"
     exit "$status"
@@ -103,4 +103,42 @@ fi
 test "$(docker inspect -f '{{.State.Health.Status}}' "$name-bad")" != healthy
 # Invalid PUID/PGID must fail closed, never fall back to root.
 if docker run --rm --user 0:0 -e PUID=0 "$image"; then exit 1; fi
+# Supplementary groups: REELARR_EXTRA_GIDS must appear on the dropped process and
+# invalid values must fail closed. Extra GIDs are never used for chown.
+extra_a=34567
+extra_b=34568
+id_out=$(docker run --rm --user 0:0 \
+    -e PUID="$uid" -e PGID="$gid" -e REELARR_EXTRA_GIDS="$extra_a, $extra_b" \
+    --entrypoint /usr/local/bin/reelarr-entrypoint "$image" id)
+echo "$id_out"
+echo "$id_out" | grep -q "uid=$uid"
+echo "$id_out" | grep -q "gid=$gid"
+echo "$id_out" | grep -q "$extra_a"
+echo "$id_out" | grep -q "$extra_b"
+# Running server must carry the same supplementary groups.
+docker run -d --name "$name-extra" --user 0:0 \
+    -e PUID="$uid" -e PGID="$gid" -e REELARR_EXTRA_GIDS="$extra_a,$extra_b" \
+    -e REELARR_PORT=7988 -v "$volume:/config" -p 127.0.0.1::7988 "$image"
+wait_healthy "$name-extra"
+docker exec "$name-extra" sh -ec "
+    found=0
+    for file in /proc/[0-9]*/status; do
+        if grep -q '^Name:.*reelarr\$' \"\$file\"; then
+            groups=\$(awk '/^Groups:/ {for (i=2; i<=NF; i++) print \$i}' \"\$file\")
+            echo \"\$groups\" | grep -qx $extra_a
+            echo \"\$groups\" | grep -qx $extra_b
+            found=1
+        fi
+    done
+    test \"\$found\" = 1
+    test \"\$(stat -c %u:%g /config)\" = $uid:$gid
+"
+docker rm -fv "$name-extra" >/dev/null
+# Invalid REELARR_EXTRA_GIDS must fail closed.
+for bad in 0 '1001,' ',1001' '1001,,1002' abc '01' '1001;1002'; do
+    if docker run --rm --user 0:0 -e PUID="$uid" -e PGID="$gid" -e REELARR_EXTRA_GIDS="$bad" "$image"; then
+        echo "REELARR_EXTRA_GIDS=$bad unexpectedly succeeded" >&2
+        exit 1
+    fi
+done
 echo 'Container runtime smoke test passed'

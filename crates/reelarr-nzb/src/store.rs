@@ -1,5 +1,6 @@
 //! Storage boundary for shared-database implementations and restart checkpoints.
 use crate::{JobId, NzbDocument, ParseError, validate};
+use reelarr_types::MovieId;
 use std::{
     collections::{BTreeSet, HashMap},
     future::Future,
@@ -23,6 +24,9 @@ pub struct StoredNzb {
     pub document: NzbDocument,
     /// Segments whose verified bytes have been durably written before checkpoint.
     pub completed: BTreeSet<SegmentKey>,
+    /// Movie this grab was for, carried to the completed download for import.
+    /// `None` only for manual/external NZBs; the importer rejects those.
+    pub movie_id: Option<MovieId>,
 }
 impl StoredNzb {
     /// Calculate pending work and byte counters, validating stored data first.
@@ -119,7 +123,11 @@ pub trait NzbStore: Send + Sync {
         &self,
         job_id: JobId,
         document: NzbDocument,
+        movie_id: Option<MovieId>,
     ) -> impl Future<Output = Result<(), StoreError>> + Send;
+    /// Delete a stored document and its checkpoints. Idempotent: removing an
+    /// absent ID succeeds. Used to roll back an admission whose job insert failed.
+    fn remove(&self, job_id: JobId) -> impl Future<Output = Result<(), StoreError>> + Send;
     /// Load a consistent snapshot; return None if absent.
     fn load(
         &self,
@@ -140,7 +148,12 @@ pub struct InMemoryNzbStore {
     entries: Arc<RwLock<HashMap<JobId, StoredNzb>>>,
 }
 impl NzbStore for InMemoryNzbStore {
-    async fn insert(&self, job_id: JobId, document: NzbDocument) -> Result<(), StoreError> {
+    async fn insert(
+        &self,
+        job_id: JobId,
+        document: NzbDocument,
+        movie_id: Option<MovieId>,
+    ) -> Result<(), StoreError> {
         validate(&document)?;
         let mut entries = self.entries.write().map_err(|_| StoreError::Backend)?;
         if entries.contains_key(&job_id) {
@@ -151,8 +164,16 @@ impl NzbStore for InMemoryNzbStore {
             StoredNzb {
                 document,
                 completed: BTreeSet::new(),
+                movie_id,
             },
         );
+        Ok(())
+    }
+    async fn remove(&self, job_id: JobId) -> Result<(), StoreError> {
+        self.entries
+            .write()
+            .map_err(|_| StoreError::Backend)?
+            .remove(&job_id);
         Ok(())
     }
     async fn load(&self, job_id: JobId) -> Result<Option<StoredNzb>, StoreError> {

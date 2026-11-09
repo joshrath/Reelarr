@@ -16,8 +16,10 @@ container/bootstrap essentials, not application/media dependencies.
   **only for bootstrap**, together with `PUID`/`PGID`. Compose demonstrates this:
   `PUID=$(id -u) PGID=$(id -g) docker compose up --build` (do not use root's ID).
   Bootstrap creates `/config` and recursively fixes ownership **only if its root
-  owner differs**. It then uses util-linux `setpriv` to clear supplementary groups
-  and all capabilities, set no-new-privileges, and exec the server with those IDs.
+  owner differs**. It then uses util-linux `setpriv` to drop capabilities, set
+  no-new-privileges, and exec the server with those IDs. Supplementary groups are
+  cleared by default; set `REELARR_EXTRA_GIDS` (comma-separated numeric GIDs) to
+  retain shared NAS groups such as `media`. See [deployment.md](deployment.md).
 - Ownership repair never follows symlinks or changes `/media` or `/downloads`.
   A symlink in place of `/config` is rejected. If files inside an already correctly
   owned `/config` have different ownership, fix them explicitly on the host; we

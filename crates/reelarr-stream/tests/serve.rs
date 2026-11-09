@@ -11,7 +11,7 @@ use axum::response::Response;
 use axum::routing::get;
 use http_body_util::BodyExt;
 use reelarr_stream::{InMemoryMediaLookup, MediaLookup, PlayableFile};
-use reelarr_types::MediaFileId;
+use reelarr_types::{MediaFileId, MediaKind, PlaybackMethod, UnsupportedKind};
 use tower::ServiceExt;
 
 struct Fixture {
@@ -39,6 +39,7 @@ fn fixture() -> Fixture {
             path: path.to_owned(),
             root: root.clone(),
             probe: None,
+            kind: Default::default(),
         })
     };
     add(1, &movie);
@@ -46,6 +47,13 @@ fn fixture() -> Fixture {
     add(3, &root.join("../outside/secret.mp4"));
     add(4, &root.join("gone.mp4"));
     add(5, &root.join("Movie (2004)"));
+    lookup.insert(PlayableFile {
+        id: MediaFileId(6),
+        path: movie.clone(),
+        root: root.clone(),
+        probe: None,
+        kind: MediaKind::DiscImage,
+    });
 
     let app = Router::new()
         .route(
@@ -191,4 +199,32 @@ async fn refuses_paths_outside_the_root_and_missing_files() {
         assert_eq!(resp.status(), StatusCode::NOT_FOUND, "id {id}");
         assert!(!body(resp).await.windows(6).any(|w| w == b"secret"));
     }
+}
+
+#[tokio::test]
+async fn disc_images_are_listed_but_not_streamed() {
+    let f = fixture();
+    let res = send(&f.app, "GET", 6, &[]).await;
+    assert_eq!(res.status(), StatusCode::UNSUPPORTED_MEDIA_TYPE);
+    let body = res.into_body().collect().await.unwrap().to_bytes();
+    assert!(String::from_utf8_lossy(&body).contains("not_playable"));
+
+    let lookup = InMemoryMediaLookup::new();
+    lookup.insert(PlayableFile {
+        id: MediaFileId(1),
+        path: "/lib/Movie.iso".into(),
+        root: "/lib".into(),
+        probe: None,
+        kind: MediaKind::DiscImage,
+    });
+    let info = reelarr_stream::playback_info(
+        &lookup,
+        MediaFileId(1),
+        reelarr_stream::ClientProfile::from_user_agent(""),
+    )
+    .await
+    .unwrap();
+    assert_eq!(info.method, PlaybackMethod::Unsupported);
+    assert_eq!(info.unsupported[0].kind, UnsupportedKind::DiscImage);
+    assert!(info.stream_url.is_none());
 }

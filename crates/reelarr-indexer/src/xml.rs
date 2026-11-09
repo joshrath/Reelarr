@@ -111,7 +111,11 @@ pub(crate) struct Page {
     pub total: Option<u64>,
 }
 
-pub(crate) fn page(body: &[u8], endpoint: &Url) -> Result<Page, IndexerError> {
+pub(crate) fn page(
+    body: &[u8],
+    endpoint: &Url,
+    config: &crate::IndexerConfig,
+) -> Result<Page, IndexerError> {
     let doc = document(body)?;
     api_error(&doc)?;
     let root = doc.root_element();
@@ -147,12 +151,7 @@ pub(crate) fn page(body: &[u8], endpoint: &Url) -> Result<Page, IndexerError> {
         let download = endpoint
             .join(enclosure.attribute("url").ok_or(BAD)?)
             .map_err(|_| IndexerError::UnsafeDownloadUrl)?;
-        if download.origin() != endpoint.origin()
-            || !download.username().is_empty()
-            || download.password().is_some()
-            || download.fragment().is_some()
-            || !matches!(download.scheme(), "https" | "http")
-        {
+        if !config.download_url_allowed(endpoint, &download) {
             return Err(IndexerError::UnsafeDownloadUrl);
         }
         let mut attributes: BTreeMap<String, Vec<String>> = BTreeMap::new();

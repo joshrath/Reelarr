@@ -8,6 +8,7 @@ pub mod assembly;
 pub mod nntp;
 mod parser;
 mod store;
+pub mod worker;
 pub mod yenc;
 
 pub use parser::{ParseError, ParseLimits, parse};

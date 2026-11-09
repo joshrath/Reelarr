@@ -26,6 +26,29 @@ A permission-denied library should be fixed on the NAS/host, not with added
 container privileges. Keep SQLite `/config` on **local** persistent storage rather
 than a network filesystem: SQLite WAL locking is unsuitable for many NAS mounts.
 
+### Shared group access (`REELARR_EXTRA_GIDS`)
+
+Many NAS setups grant media access through a shared Unix group (for example a
+`media` group) rather than making every file owned by the Reelarr UID. Bootstrap
+normally runs `setpriv --clear-groups`, which drops supplementary groups. Set
+`REELARR_EXTRA_GIDS` to a comma-separated list of **numeric** GIDs to keep those
+groups after the drop (requires root bootstrap, `user: "0:0"`):
+
+```yaml
+environment:
+  PUID: "1000"
+  PGID: "1000"
+  # GID of the shared 'media' group on the NAS/host (getent group media)
+  REELARR_EXTRA_GIDS: "1001"
+```
+
+Multiple groups are allowed (`"1001,1002"`). Spaces around commas are trimmed.
+Values must be positive decimal GIDs without leading zeros; empty entries and
+`0` are rejected. Extra GIDs are **never** used for `chown` — ownership repair
+still targets only `/config` as `PUID:PGID`. Direct non-root runs (`--user
+PUID:PGID`) cannot apply this variable; use Docker `--group-add` instead, or
+switch to root bootstrap.
+
 ## NFS: Docker local driver
 
 Copy the commented example from `docker-compose.yml`, adjusting address/export:
@@ -47,7 +70,8 @@ volumes:
 
 `ro` on the service mount enforces read-only access inside Reelarr even though
 the host's NFS mount uses `rw`. To import to this root, deliberately change the
-service suffix to `rw` and grant NAS write access to PUID/PGID. `hard` preserves
+service suffix to `rw` and grant NAS write access to PUID/PGID (and any shared
+group listed in `REELARR_EXTRA_GIDS`, such as `media`). `hard` preserves
 NFS I/O semantics during outages but can block I/O until the NAS returns; scanner
 bounded concurrency/offline-root handling is separate work in #59. Arrange host
 boot ordering/network availability before starting Reelarr.
@@ -121,9 +145,12 @@ volumes:
       create_host_path: false
 ```
 
-Match both the host `uid/gid` options and PUID/PGID to your NAS permissions. For
-write-enabled imports deliberately change both the host `ro` and container
-`read_only`. `create_host_path: false` prevents an absent directory from being
-silently created; it does **not** prove the NAS is mounted. Check `findmnt` on the
-host and use a NAS-resident sentinel/monitor before startup. Runtime root-health,
-adopt-in-place guarantees and unavailable-item behavior remain tracked in #59.
+Match both the host `uid/gid` options and PUID/PGID to your NAS permissions. If
+library files are group-readable via a shared `media` (or similar) group, also
+set `REELARR_EXTRA_GIDS` to that group's numeric GID so the container process
+retains it after bootstrap. For write-enabled imports deliberately change both
+the host `ro` and container `read_only`. `create_host_path: false` prevents an
+absent directory from being silently created; it does **not** prove the NAS is
+mounted. Check `findmnt` on the host and use a NAS-resident sentinel/monitor
+before startup. Runtime root-health, adopt-in-place guarantees and
+unavailable-item behavior remain tracked in #59.

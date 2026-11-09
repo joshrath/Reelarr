@@ -29,9 +29,9 @@ pub use transfer::{TransferMode, Transferred};
 use std::path::{Path, PathBuf};
 use std::time::UNIX_EPOCH;
 
-use reelarr_types::{LibraryRootId, MediaFileId, MediaFileStatus, MovieId};
+use reelarr_types::{LibraryRootId, MediaFileId, MediaFileStatus, MediaKind, MovieId};
 
-use crate::scan::{MediaFileStore, NewMediaFile, Prober};
+use crate::scan::{self, MediaFileStore, NewMediaFile, Prober};
 use crate::store::{MovieStore, StoreError};
 
 /// One download to import.
@@ -163,12 +163,39 @@ impl<M: MovieStore, F: MediaFileStore, P: Prober, R: ReleaseMatcher> Importer<M,
                 selection.leftovers.len()
             )));
         }
-        let (source, _) = selection
-            .main
-            .ok_or_else(|| Failure::permanent("no importable video file in the download".into()))?;
+        let (source, kind) = match (selection.main, selection.image) {
+            (Some((video, _)), _) => (video, MediaKind::File),
+            (None, Some((image, _))) => {
+                let check = image.clone();
+                if blocking(move || scan::disc::has_disc_signature(&check)).await? {
+                    (image, MediaKind::DiscImage)
+                } else {
+                    return Err(Failure::permanent(format!(
+                        "{} is not a recognized disc image",
+                        image.display()
+                    )));
+                }
+            }
+            (None, None) if !selection.disc_folders.is_empty() => {
+                return Err(Failure::permanent(format!(
+                    "{} is a DVD/Blu-ray folder rip, which can't be imported yet",
+                    selection.disc_folders[0].display()
+                )));
+            }
+            (None, None) => {
+                return Err(Failure::permanent(
+                    "no importable video file in the download".into(),
+                ));
+            }
+        };
 
-        // 3. Destination name. Probe the source for the quality label.
-        let source_probe = self.prober.probe(&source).await.ok();
+        // 3. Destination name. Probe the source for the quality label
+        // (disc images are never probed).
+        let source_probe = if kind.is_disc() {
+            None
+        } else {
+            self.prober.probe(&source).await.ok()
+        };
         let values = NamingValues {
             title: movie.metadata.title.clone(),
             year: movie.metadata.year,
@@ -201,7 +228,7 @@ impl<M: MovieStore, F: MediaFileStore, P: Prober, R: ReleaseMatcher> Importer<M,
         })
         .await?;
 
-        if self.options.import_subtitles {
+        if self.options.import_subtitles && !kind.is_disc() {
             let subs = selection.subtitles.clone();
             let (src, dst) = (source.clone(), dest.clone());
             let copied = blocking(move || Ok(copy_subtitles(&src, &dst, &subs, mode))).await?;
@@ -211,7 +238,11 @@ impl<M: MovieStore, F: MediaFileStore, P: Prober, R: ReleaseMatcher> Importer<M,
         }
 
         // 5. Record.
-        let probe = self.prober.probe(&dest).await.ok().or(source_probe);
+        let probe = if kind.is_disc() {
+            None
+        } else {
+            self.prober.probe(&dest).await.ok().or(source_probe)
+        };
         let meta = tokio::fs::metadata(&dest)
             .await
             .map_err(|e| Failure::retryable(format!("cannot read imported file: {e}")))?;
@@ -229,6 +260,7 @@ impl<M: MovieStore, F: MediaFileStore, P: Prober, R: ReleaseMatcher> Importer<M,
                 existing.modified_at = modified_at;
                 existing.status = MediaFileStatus::Present;
                 existing.probe = probe;
+                existing.kind = kind;
                 self.files.update(&existing).await?;
                 existing.id
             }
@@ -241,6 +273,7 @@ impl<M: MovieStore, F: MediaFileStore, P: Prober, R: ReleaseMatcher> Importer<M,
                         size_bytes: meta.len(),
                         modified_at,
                         probe,
+                        kind,
                     })
                     .await?
                     .id
