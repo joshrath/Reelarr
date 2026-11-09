@@ -5,12 +5,13 @@ use axum::{
     body::Body,
     extract::State,
     http::{Request, StatusCode, Uri},
-    response::{IntoResponse, Response},
+    response::{IntoResponse, Redirect, Response},
+    routing::get,
 };
 use leptos::prelude::*;
 use leptos_axum::{LeptosRoutes, file_and_error_handler, generate_route_list};
 
-use crate::app::{App, shell};
+use crate::app::{App, REDIRECTS, shell};
 
 /// Routes for the web UI, ready for `reelarr-server` to merge.
 ///
@@ -23,7 +24,11 @@ where
     S: Clone + Send + Sync + 'static,
 {
     let routes = generate_route_list(App);
-    Router::new()
+    let mut router = Router::new();
+    for (from, to) in REDIRECTS {
+        router = router.route(from, get(move || async move { Redirect::permanent(to) }));
+    }
+    router
         .leptos_routes(&options, routes, {
             let options = options.clone();
             move || shell(options.clone())

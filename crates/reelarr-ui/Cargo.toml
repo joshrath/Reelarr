@@ -23,6 +23,8 @@ axum = { workspace = true, optional = true }
 # Client-side hydration (wasm32).
 wasm-bindgen = { workspace = true, optional = true }
 console_error_panic_hook = { workspace = true, optional = true }
+# Always on so SSR type-checks the DOM calls too.
+web-sys = { workspace = true, features = ["Document", "Element", "HtmlDocument"] }
 
 [features]
 default = []
