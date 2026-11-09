@@ -11,8 +11,8 @@ use reelarr_media::import::{
 use reelarr_media::scan::{InMemoryMediaFileStore, MediaFileStore, ProbeError, Prober};
 use reelarr_media::{InMemoryMovieStore, MovieStore};
 use reelarr_types::{
-    Artwork, ExternalIds, LibraryRootId, MediaProbe, MediaStream, MovieId, MovieMetadata,
-    StreamKind,
+    Artwork, ExternalIds, LibraryRootId, MediaKind, MediaProbe, MediaStream, MovieId,
+    MovieMetadata, StreamKind,
 };
 
 struct FakeProber;
@@ -342,4 +342,66 @@ async fn custom_template_and_single_file_output() {
             .join("Movies")
             .join("The Example Movie [tmdb-1001].mkv")
     );
+}
+
+fn write_bytes(dir: &Path, rel: &str, bytes: &[u8]) -> PathBuf {
+    let path = dir.join(rel);
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    std::fs::write(&path, bytes).unwrap();
+    path
+}
+
+fn iso_bytes() -> Vec<u8> {
+    let mut data = vec![0u8; 18 * 2048];
+    data[16 * 2048 + 1..16 * 2048 + 6].copy_from_slice(b"CD001");
+    data
+}
+
+#[tokio::test]
+async fn disc_image_download_is_imported_as_one_unprobed_file() {
+    let env = env().await;
+    write_bytes(&env.downloads, &format!("{JOB}/movie.iso"), &iso_bytes());
+    let imp = importer(&env, |_| {});
+    let outcome = imp.import(&request(&env, JOB, Some(env.movie))).await;
+    let ImportOutcome::Imported {
+        media_file_id,
+        path,
+        ..
+    } = outcome
+    else {
+        panic!("expected import, got {outcome:?}");
+    };
+    assert_eq!(path.extension().unwrap(), "iso");
+    let stored = imp.files().get(media_file_id).await.unwrap().unwrap();
+    assert_eq!(stored.kind, MediaKind::DiscImage);
+    assert!(stored.probe.is_none());
+}
+
+#[tokio::test]
+async fn unrecognized_images_and_disc_folders_fail_permanently() {
+    let env = env().await;
+    write(&env.downloads, &format!("{JOB}/movie.iso"), 5000);
+    let outcome = importer(&env, |_| {})
+        .import(&request(&env, JOB, Some(env.movie)))
+        .await;
+    assert!(
+        matches!(outcome, ImportOutcome::Failed { retryable: false, ref reason } if reason.contains("not a recognized disc image")),
+        "{outcome:?}"
+    );
+
+    let job = "Other.Movie.2004.COMPLETE.BLURAY";
+    write(&env.downloads, &format!("{job}/BDMV/index.bdmv"), 5);
+    write(
+        &env.downloads,
+        &format!("{job}/BDMV/STREAM/00001.m2ts"),
+        5000,
+    );
+    let outcome = importer(&env, |_| {})
+        .import(&request(&env, job, Some(env.movie)))
+        .await;
+    assert!(
+        matches!(outcome, ImportOutcome::Failed { retryable: false, ref reason } if reason.contains("can't be imported yet")),
+        "{outcome:?}"
+    );
+    assert!(!env.library.join("The Example Movie (2004)").exists());
 }

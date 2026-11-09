@@ -74,13 +74,47 @@ and `InMemoryMediaFileStore` is for tests.
   `rescan_interval_secs` (default 6 hours, configurable per root, `None`
   disables it) until it is told to shut down. Polling is used because
   inotify-style notifications are unreliable on SMB and NFS. Only one scan
-  per root runs at a time.
+  per root runs at a time. A walk that takes longer than
+  `ScanOptions::walk_timeout` (default 30 minutes) reports the root
+  unavailable instead of hanging on a stuck share.
+
+## Disc rips
+
+DVD and Blu-ray rips are recorded, one row each, with a `kind`:
+
+- `disc_folder`: a folder holding `VIDEO_TS` (with `VIDEO_TS.IFO` or a
+  `.VOB`) or `BDMV` (with `index.bdmv` or `STREAM`). It is not descended
+  into, and the files inside disc structures (`BDMV/STREAM/*.m2ts`,
+  `VIDEO_TS/*.VOB`, `AACS`, `CERTIFICATE`) are never treated as separate
+  movies, even in an incomplete rip. Its size is summed within
+  `disc_max_entries` and `disc_timeout`; past those limits the existing row
+  is kept as it was and a walk error is reported.
+- `disc_image`: an `.iso` with an ISO 9660 or UDF signature in its volume
+  descriptors (read on a blocking thread with `disc_timeout`).
+- `unrecognized_image`: an `.iso` without one. It is kept and flagged, never
+  imported or adopted as a disc.
+
+Discs are never ffprobed and aren't playable yet: playback info lists them as
+`disc_image` unsupported and the stream endpoint answers
+`415 not_playable`. Nothing is mounted or extracted.
+
+## Adopting an existing library
+
+`adopt::adopt_root` links a root's unlinked media files to movies without
+writing anything to disk (no renames, moves or new files). For each file it
+uses, in order: a `{tmdb-N}`/`[tmdbid-N]` or `{imdb-ttN}`/`[imdbid-ttN]` tag in
+the folder or file name; title and year from the folder name (or the file
+name at the top of the root) against movies already in the library; then a
+metadata search, accepted only when exactly one result has that exact title
+and year. Everything else comes back in `AdoptReport::unmatched` with a reason
+for manual review. Already linked files are left alone, so it is safe to
+rerun.
 
 ## Library folders and network shares
 
 Library roots, movies and media files are stored in SQLite (`db`:
 `SqliteLibraryRootStore`, `SqliteMovieStore`, `SqliteMediaFileStore`; schema
-in `reelarr-db`'s `0003_library.sql`). Roots must be absolute and may not
+in `reelarr-db`'s `0003_library.sql` and `0004_media_kind.sql`). Roots must be absolute and may not
 overlap. Removing a root that has files fails unless `forget_files` is set,
 which deletes only the library rows, never files on disk.
 
@@ -109,6 +143,10 @@ returns `Imported`, `Failed { reason, retryable }` or `NoMatch`.
 - The largest video at or above `min_video_bytes` is imported. Samples are
   skipped and output with leftover `.rar`/`.rNN`/`.par2`/`.7z`/`.zip` files is
   refused as "extraction incomplete".
+- Without a video, a valid `.iso` is imported as a single `disc_image` file
+  (not probed, no subtitles). An `.iso` that isn't a disc image fails as
+  "not a recognized disc image". DVD/Blu-ray folder rips fail for now; copying
+  a whole disc tree comes later.
 - Files are renamed from a template (default
   `{Title} ({Year})/{Title} ({Year}) [{Quality}]`; tokens `{Title}`, `{Year}`,
   `{Quality}`, `{TmdbId}`, `{ImdbId}`), with names made safe for Windows and

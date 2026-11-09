@@ -81,8 +81,55 @@ pub struct MediaFile {
     /// Modification time as Unix seconds, used for change detection.
     pub modified_at: i64,
     pub status: MediaFileStatus,
-    /// `None` until the file has been probed successfully.
+    /// `None` until the file has been probed successfully. Disc rips are
+    /// never probed.
     pub probe: Option<MediaProbe>,
+    /// A regular video file or a disc rip.
+    #[serde(default)]
+    pub kind: MediaKind,
+}
+
+/// What a library entry is. Disc rips are kept as one entry each and left
+/// untouched; they are listed but not yet playable.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MediaKind {
+    /// A single video file.
+    #[default]
+    File,
+    /// An `.iso` with an ISO 9660 or UDF signature.
+    DiscImage,
+    /// A DVD (`VIDEO_TS`) or Blu-ray (`BDMV`) folder; the path is the folder
+    /// that contains it.
+    DiscFolder,
+    /// An `.iso` without a recognizable disc signature. Listed so the user
+    /// can see it, never imported as a disc.
+    UnrecognizedImage,
+}
+
+impl MediaKind {
+    pub fn is_disc(self) -> bool {
+        !matches!(self, MediaKind::File)
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            MediaKind::File => "file",
+            MediaKind::DiscImage => "disc_image",
+            MediaKind::DiscFolder => "disc_folder",
+            MediaKind::UnrecognizedImage => "unrecognized_image",
+        }
+    }
+
+    pub fn parse(value: &str) -> Option<Self> {
+        Some(match value {
+            "file" => MediaKind::File,
+            "disc_image" => MediaKind::DiscImage,
+            "disc_folder" => MediaKind::DiscFolder,
+            "unrecognized_image" => MediaKind::UnrecognizedImage,
+            _ => return None,
+        })
+    }
 }
 
 /// Whether a known file is currently on disk.

@@ -11,8 +11,8 @@ use reelarr_media::scan::{MediaFileStore, NewMediaFile, ProbeError, Prober, Scan
 use reelarr_media::store::{MovieStore, StoreError};
 use reelarr_stream::{Lookup, MediaLookup};
 use reelarr_types::{
-    Artwork, ExternalIds, LibraryRoot, LibraryRootKind, MediaFileId, MediaFileStatus, MediaProbe,
-    MovieMetadata, NewLibraryRoot, RootHealth,
+    Artwork, ExternalIds, LibraryRoot, LibraryRootKind, MediaFileId, MediaFileStatus, MediaKind,
+    MediaProbe, MovieMetadata, NewLibraryRoot, RootHealth,
 };
 
 /// A file-backed database: `:memory:` gives each pooled connection its own
@@ -100,6 +100,7 @@ async fn media_files_round_trip_status_and_probe() {
             size_bytes: 5_000_000_000,
             modified_at: 42,
             probe: Some(probe()),
+            kind: Default::default(),
         })
         .await
         .unwrap();
@@ -113,6 +114,7 @@ async fn media_files_round_trip_status_and_probe() {
                 size_bytes: 1,
                 modified_at: 1,
                 probe: None,
+                kind: Default::default(),
             })
             .await
             .is_err()
@@ -171,6 +173,7 @@ async fn removing_a_root_with_files_needs_confirmation_and_keeps_disk_files() {
             size_bytes: 1,
             modified_at: 1,
             probe: None,
+            kind: Default::default(),
         })
         .await
         .unwrap();
@@ -233,6 +236,7 @@ async fn lookup_distinguishes_found_missing_and_unavailable() {
             size_bytes: 1,
             modified_at: 1,
             probe: Some(probe()),
+            kind: Default::default(),
         })
         .await
         .unwrap();
@@ -249,6 +253,26 @@ async fn lookup_distinguishes_found_missing_and_unavailable() {
         lookup.lookup(MediaFileId(999)).await.unwrap(),
         Lookup::NotFound
     );
+    let disc = files
+        .insert(NewMediaFile {
+            movie_id: None,
+            root_id: root.id,
+            path: format!("{}/Movie (2010)", root.path),
+            size_bytes: 9,
+            modified_at: 1,
+            probe: None,
+            kind: MediaKind::DiscFolder,
+        })
+        .await
+        .unwrap();
+    assert_eq!(
+        files.get(disc.id).await.unwrap().unwrap().kind,
+        MediaKind::DiscFolder
+    );
+    match lookup.lookup(disc.id).await.unwrap() {
+        Lookup::Found(found) => assert_eq!(found.kind, MediaKind::DiscFolder),
+        other => panic!("expected found, got {other:?}"),
+    }
     roots
         .set_health(
             root.id,

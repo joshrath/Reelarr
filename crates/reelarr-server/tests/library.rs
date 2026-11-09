@@ -142,6 +142,7 @@ async fn add_list_check_and_remove_roots() {
             size_bytes: 1,
             modified_at: 1,
             probe: None,
+            kind: Default::default(),
         })
         .await
         .unwrap();
@@ -204,6 +205,7 @@ async fn playback_of_a_file_on_an_offline_root_is_503() {
             size_bytes: 10,
             modified_at: 1,
             probe: None,
+            kind: Default::default(),
         })
         .await
         .unwrap();

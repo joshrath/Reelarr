@@ -3,7 +3,7 @@ use reelarr_stream::{Lookup, LookupError, LookupFuture, MediaLookup, PlayableFil
 use reelarr_types::MediaFileId;
 use sqlx::Row;
 
-use super::files::probe_from_json;
+use super::files::{kind_from_row, probe_from_json};
 
 /// [`MediaLookup`] for playback, reading `media_files` joined to its root.
 ///
@@ -24,7 +24,7 @@ impl DbMediaLookup {
     async fn find(&self, id: MediaFileId) -> Result<Lookup, LookupError> {
         let err = |e: sqlx::Error| LookupError(e.to_string());
         let Some(row) = sqlx::query(
-            "SELECT f.path, f.missing_since, f.probe, r.path AS root_path, r.health, \
+            "SELECT f.path, f.missing_since, f.probe, f.kind, r.path AS root_path, r.health, \
              r.health_reason FROM media_files f JOIN library_roots r ON r.id = f.root_id \
              WHERE f.id = ?",
         )
@@ -53,6 +53,7 @@ impl DbMediaLookup {
             path: row.try_get::<String, _>("path").map_err(err)?.into(),
             root: row.try_get::<String, _>("root_path").map_err(err)?.into(),
             probe,
+            kind: kind_from_row(&row).map_err(|e| LookupError(e.to_string()))?,
         }))
     }
 }

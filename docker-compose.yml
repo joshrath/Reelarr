@@ -8,6 +8,8 @@ services:
     environment:
       PUID: "${PUID:-1000}"
       PGID: "${PGID:-1000}"
+      # Optional shared NAS group GIDs (e.g. 'media'). Root bootstrap only; never used for chown.
+      # REELARR_EXTRA_GIDS: "1001"
     ports:
       - "7979:7979"
     volumes:

@@ -1,4 +1,4 @@
-# reelarr-nzb: parser, NNTP, yEnc and resume boundary
+# reelarr-nzb: parser, NNTP, yEnc, resume boundary and job worker
 
 Clean-room implementation using the public NZB XML structure
 (<https://www.newzbin.com/DTD/nzb/nzb-1.1.dtd>) and XML 1.0 rules;
@@ -187,3 +187,44 @@ There is no separate state database/file, NNTP connection, or core event policy.
   MIT OR Apache-2.0**. Both license options are GPL-3.0-or-later compatible.
   No new testing dependency: deterministic seeded round trips and mutation tests
   provide fuzz-style coverage without adding proptest.
+
+## Job worker (`worker`)
+
+`NzbWorker` drives one core job from `Queued` to `ReadyForImport` using core's
+transition graph (it adds no states): download articles through an
+`ArticleSource` (implemented for `nntp::Pool`) with bounded concurrency, decode
+and assemble each file on a blocking thread, verify, optionally repair, extract
+stored RAR sets with `reelarr-rar`, and publish one folder atomically. Import is
+left to `reelarr_core::jobs::run_import`; register `NzbWorker::cleanup()` for
+`DownloadSource::BuiltinNzb` so staging and the published folder are removed
+after a successful import. `enqueue` parses an NZB, stores it with the grab's `movie_id`, then creates its job (the NZB is stored first and removed if the job insert fails, so no runnable job exists without its NZB). The completed download carries that `movie_id`.
+
+Staging lives in `staging_root/<job id>/files/<file index>/<name>`. A file is moved
+there only after the assembler verified and fsynced it, and its segments are
+checkpointed only after that move is durable. Fully checkpointed files that are
+present on disk are reused after pause, restart or re-queue; everything else for
+that index is downloaded again. There is no sidecar state file. The recovery path
+(`RecoveryPaths`, backed by reelarr-db) points at staging until publication and
+at the published folder afterwards, so `Verifying`, `Repairing` and `Extracting`
+can be re-entered after a restart from what is on disk.
+
+yEnc part CRCs (and whole-file CRCs when present) decide whether a download is
+intact. Intact downloads never consult parity, and PAR2 recovery volumes
+(`*.volNN+MM.par2`) are not downloaded. Until Rust PAR2 support lands (#74 verify,
+#38 repair) the default `NoParity` backend makes damaged downloads fail with
+`RepairFailed`, `retryable: false`, and a message starting with
+`worker::REPAIR_UNAVAILABLE`; completed files stay in staging for a later retry.
+
+Extraction recognizes `name.partNN.rar` and `name.rar`/`name.rNN` sets only.
+Encrypted archives fail with `PasswordRequired`; compressed or otherwise
+unsupported archives, unrecognized (obfuscated) RAR names, name collisions and
+downloads with nothing to import fail with `ExtractFailed`. `.par2`, `.sfv`,
+`.nzb` and `.srr` files are not published. The final folder name comes from the
+job title with unsafe characters replaced; if it exists, part of the job id is
+appended. `staging_root` and `output_root` must be Reelarr-owned directories.
+
+Pause and cancel belong to the controller: it changes the job state, then fires
+the run's `CancelToken`. The worker stops at the next article or archive
+checkpoint, removes partial assembly and unfinished publication, and returns
+`Outcome::Stopped` without changing state. `discard` removes a cancelled job's
+staging directory.

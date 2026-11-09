@@ -111,12 +111,14 @@ async fn setup() -> (tempfile::TempDir, Router) {
         path: root.join("a.mp4"),
         root: root.clone(),
         probe: Some(probe("h264")),
+        kind: Default::default(),
     });
     lookup.insert(PlayableFile {
         id: MediaFileId(2),
         path: root.join("b.mp4"),
         root,
         probe: Some(probe("hevc")),
+        kind: Default::default(),
     });
     let mut state = AppState::new(reelarr_db::Database::connect(":memory:").await.unwrap());
     state.media = lookup;
