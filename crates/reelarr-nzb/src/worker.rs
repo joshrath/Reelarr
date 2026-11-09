@@ -50,6 +50,7 @@ use reelarr_core::jobs::{
     CleanupError, CompletedDownload, DownloadSource, Failure, FailureCode, Job, JobKind, JobState,
     JobStore, JobStoreError, Progress, SourceCleanup,
 };
+use reelarr_types::MovieId;
 use std::{
     collections::{BTreeMap, BTreeSet, HashSet},
     fs,
@@ -236,8 +237,8 @@ impl WorkerConfig {
 /// not as [`WorkerError`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Outcome {
-    /// Published and in `ReadyForImport`. `movie_id` is `None`: the caller
-    /// fills it from its grab metadata before calling `run_import`.
+    /// Published and in `ReadyForImport`, carrying the `movie_id` given at
+    /// enqueue; pass it to `run_import` as is.
     ReadyForImport(CompletedDownload),
     /// The job moved to `Failed` with this failure.
     Failed(Failure),
@@ -405,11 +406,17 @@ where
 
     /// Parse and store an NZB and create its `Queued` job. The NZB's own title
     /// wins over `fallback_title`; `category` wins over the NZB's category.
+    /// `movie_id` is stored with the NZB and returned on the completed download.
+    ///
+    /// Admission is ordered so a runnable job never exists without its NZB: the
+    /// document is stored under the new job's ID first, and removed again if the
+    /// job insert fails.
     pub async fn enqueue(
         &self,
         nzb: impl Read,
         fallback_title: &str,
         category: Option<String>,
+        movie_id: Option<MovieId>,
     ) -> Result<Job, EnqueueError> {
         let document = parse(nzb, self.config.parse_limits)?;
         let title = document
@@ -419,21 +426,20 @@ where
             .unwrap_or_else(|| fallback_title.to_owned());
         let mut job = Job::new(JobKind::Nzb, title);
         job.category = category.or_else(|| document.category.clone());
-        let job = self.jobs.insert(job).await.map_err(WorkerError::from)?;
-        if let Err(e) = self.nzbs.insert(job.id, document).await {
-            // Don't leave a runnable job without its NZB.
-            let failure = Failure {
-                code: FailureCode::Other,
-                message: "Could not store the NZB for this job".into(),
-                retryable: false,
-            };
-            self.jobs
-                .transition(job.id, JobState::Failed, Some(failure))
-                .await
-                .map_err(WorkerError::from)?;
-            return Err(WorkerError::from(e).into());
+        let id = job.id;
+        self.nzbs
+            .insert(id, document, movie_id)
+            .await
+            .map_err(WorkerError::from)?;
+        match self.jobs.insert(job).await {
+            Ok(job) => Ok(job),
+            Err(e) => {
+                if let Err(cleanup) = self.nzbs.remove(id).await {
+                    tracing::warn!(job = %id, error = %cleanup, "could not remove NZB of a failed admission");
+                }
+                Err(WorkerError::from(e).into())
+            }
         }
-        Ok(job)
     }
 
     /// Drive one job as far as `ReadyForImport`. Re-enters `Verifying`,
@@ -448,6 +454,7 @@ where
             return Err(not_runnable);
         }
         let stored = self.nzbs.load(id).await?.ok_or(StoreError::NotFound)?;
+        let movie_id = stored.movie_id;
         let document = stored.document;
         let result = match job.state {
             JobState::Queued | JobState::Downloading => {
@@ -463,7 +470,10 @@ where
             _ => return Err(not_runnable),
         };
         match result {
-            Ok(download) => Ok(Outcome::ReadyForImport(download)),
+            Ok(download) => Ok(Outcome::ReadyForImport(CompletedDownload {
+                movie_id,
+                ..download
+            })),
             Err(Stop::Cancelled) => Ok(Outcome::Stopped),
             Err(Stop::Error(e)) => Err(e),
             Err(Stop::Fail(failure)) => {
@@ -1111,7 +1121,8 @@ fn single_file(dir: &Path) -> io::Result<Option<PathBuf>> {
     let mut found = None;
     for entry in entries {
         let entry = entry?;
-        let meta = entry.metadata()?;
+        // Never follow a symlink: only a real regular file can be reused.
+        let meta = fs::symlink_metadata(entry.path())?;
         if found.is_some() || !meta.is_file() || meta.len() == 0 {
             return Ok(None);
         }
@@ -1436,7 +1447,12 @@ fn extract_and_publish(
         return Err(stop);
     }
     let target = final_path(output_root, title, id);
-    fs::rename(publish, &target)?;
+    if let Err(e) = fs::rename(publish, &target) {
+        // Don't leave a half-published folder in the output root.
+        let _ = remove_all(publish);
+        let _ = remove_all(&inputs);
+        return Err(e.into());
+    }
     sync_dir(output_root)?;
     let _ = remove_all(&inputs);
     Ok(target)
@@ -1445,6 +1461,21 @@ fn extract_and_publish(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(unix)]
+    #[test]
+    fn single_file_ignores_symlinks() {
+        let dir = tempfile::tempdir().unwrap();
+        let outside = dir.path().join("outside.mkv");
+        fs::write(&outside, b"data").unwrap();
+        let slot = dir.path().join("files/0");
+        fs::create_dir_all(&slot).unwrap();
+        std::os::unix::fs::symlink(&outside, slot.join("Movie.mkv")).unwrap();
+        assert_eq!(single_file(&slot).unwrap(), None);
+        fs::remove_file(slot.join("Movie.mkv")).unwrap();
+        fs::write(slot.join("Movie.mkv"), b"data").unwrap();
+        assert_eq!(single_file(&slot).unwrap(), Some(slot.join("Movie.mkv")));
+    }
 
     #[test]
     fn recovery_volume_names() {

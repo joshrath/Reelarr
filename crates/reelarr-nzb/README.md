@@ -197,7 +197,7 @@ and assemble each file on a blocking thread, verify, optionally repair, extract
 stored RAR sets with `reelarr-rar`, and publish one folder atomically. Import is
 left to `reelarr_core::jobs::run_import`; register `NzbWorker::cleanup()` for
 `DownloadSource::BuiltinNzb` so staging and the published folder are removed
-after a successful import. `enqueue` parses an NZB and creates its job.
+after a successful import. `enqueue` parses an NZB, stores it with the grab's `movie_id`, then creates its job (the NZB is stored first and removed if the job insert fails, so no runnable job exists without its NZB). The completed download carries that `movie_id`.
 
 Staging lives in `staging_root/<job id>/files/<file index>/<name>`. A file is moved
 there only after the assembler verified and fsynced it, and its segments are

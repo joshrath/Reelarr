@@ -251,7 +251,12 @@ async fn plain_files_publish_atomically_and_skip_recovery_volumes() {
     let e = env(articles);
     let job = e
         .worker
-        .enqueue(nzb.as_bytes(), "fallback", Some("movies".into()))
+        .enqueue(
+            nzb.as_bytes(),
+            "fallback",
+            Some("movies".into()),
+            Some(reelarr_types::MovieId(42)),
+        )
         .await
         .unwrap();
     assert_eq!(job.title, "Movie (2024) 1080p");
@@ -259,6 +264,7 @@ async fn plain_files_publish_atomically_and_skip_recovery_volumes() {
 
     assert_eq!(download.output_path, e.output.join("Movie (2024) 1080p"));
     assert_eq!(download.category.as_deref(), Some("movies"));
+    assert_eq!(download.movie_id, Some(reelarr_types::MovieId(42)));
     assert_eq!(download.source, DownloadSource::BuiltinNzb);
     assert_eq!(listing(&download.output_path), ["Movie.mkv"]);
     assert_eq!(
@@ -299,7 +305,11 @@ async fn stored_rar_volumes_extract_into_the_published_folder() {
         .collect();
     let (nzb, articles) = release("Rar Release", &posts);
     let e = env(articles);
-    let job = e.worker.enqueue(nzb.as_bytes(), "x", None).await.unwrap();
+    let job = e
+        .worker
+        .enqueue(nzb.as_bytes(), "x", None, None)
+        .await
+        .unwrap();
     let download = ready(e.worker.run(job.id, &CancelToken::new()).await.unwrap()).await;
     assert_eq!(
         listing(&download.output_path),
@@ -320,7 +330,11 @@ async fn old_style_rar_names_extract() {
         .collect();
     let (nzb, articles) = release("Old Names", &posts);
     let e = env(articles);
-    let job = e.worker.enqueue(nzb.as_bytes(), "x", None).await.unwrap();
+    let job = e
+        .worker
+        .enqueue(nzb.as_bytes(), "x", None, None)
+        .await
+        .unwrap();
     let download = ready(e.worker.run(job.id, &CancelToken::new()).await.unwrap()).await;
     assert_eq!(listing(&download.output_path), ["payload.txt"]);
 }
@@ -335,7 +349,11 @@ async fn missing_articles_fail_as_repair_unavailable_and_retry_reuses_completed_
     let gone = ids(0, &posts[0])[1].clone();
     let saved = articles.remove(&gone).unwrap();
     let e = env(articles);
-    let job = e.worker.enqueue(nzb.as_bytes(), "x", None).await.unwrap();
+    let job = e
+        .worker
+        .enqueue(nzb.as_bytes(), "x", None, None)
+        .await
+        .unwrap();
 
     let Outcome::Failed(failure) = e.worker.run(job.id, &CancelToken::new()).await.unwrap() else {
         panic!("expected failure");
@@ -390,7 +408,11 @@ async fn corrupted_article_counts_as_damage() {
     let at = body.len() / 2;
     body[at] ^= 0x01;
     let e = env(articles);
-    let job = e.worker.enqueue(nzb.as_bytes(), "x", None).await.unwrap();
+    let job = e
+        .worker
+        .enqueue(nzb.as_bytes(), "x", None, None)
+        .await
+        .unwrap();
     let Outcome::Failed(failure) = e.worker.run(job.id, &CancelToken::new()).await.unwrap() else {
         panic!("expected failure");
     };
@@ -404,7 +426,11 @@ async fn pause_stops_without_publishing_and_resume_finishes() {
     let slow = ids(0, &posts[0])[3].clone();
     let e = Arc::new(env(articles));
     e.source.hang.lock().unwrap().insert(slow.clone());
-    let job = e.worker.enqueue(nzb.as_bytes(), "x", None).await.unwrap();
+    let job = e
+        .worker
+        .enqueue(nzb.as_bytes(), "x", None, None)
+        .await
+        .unwrap();
     let cancel = CancelToken::new();
     let run = {
         let (e, cancel) = (e.clone(), cancel.clone());
@@ -441,7 +467,11 @@ async fn cancelled_job_is_left_alone_and_discard_removes_staging() {
     let slow = ids(0, &posts[0])[2].clone();
     let e = Arc::new(env(articles));
     e.source.hang.lock().unwrap().insert(slow);
-    let job = e.worker.enqueue(nzb.as_bytes(), "x", None).await.unwrap();
+    let job = e
+        .worker
+        .enqueue(nzb.as_bytes(), "x", None, None)
+        .await
+        .unwrap();
     let cancel = CancelToken::new();
     let run = {
         let (e, cancel) = (e.clone(), cancel.clone());
@@ -466,7 +496,11 @@ async fn server_login_rejection_is_server_auth() {
     let (nzb, articles) = release("Auth", &posts);
     let e = env(articles);
     *e.source.auth_fail.lock().unwrap() = true;
-    let job = e.worker.enqueue(nzb.as_bytes(), "x", None).await.unwrap();
+    let job = e
+        .worker
+        .enqueue(nzb.as_bytes(), "x", None, None)
+        .await
+        .unwrap();
     let Outcome::Failed(failure) = e.worker.run(job.id, &CancelToken::new()).await.unwrap() else {
         panic!("expected failure");
     };
@@ -479,7 +513,11 @@ async fn obfuscated_rar_volume_is_not_published() {
     let posts = [post("a1b2c3d4", rar_fixture("real5.part1.rar"))];
     let (nzb, articles) = release("Obfuscated", &posts);
     let e = env(articles);
-    let job = e.worker.enqueue(nzb.as_bytes(), "x", None).await.unwrap();
+    let job = e
+        .worker
+        .enqueue(nzb.as_bytes(), "x", None, None)
+        .await
+        .unwrap();
     let Outcome::Failed(failure) = e.worker.run(job.id, &CancelToken::new()).await.unwrap() else {
         panic!("expected failure");
     };
@@ -497,7 +535,11 @@ async fn incomplete_volume_set_fails_extraction() {
         .collect();
     let (nzb, articles) = release("Short set", &posts);
     let e = env(articles);
-    let job = e.worker.enqueue(nzb.as_bytes(), "x", None).await.unwrap();
+    let job = e
+        .worker
+        .enqueue(nzb.as_bytes(), "x", None, None)
+        .await
+        .unwrap();
     let Outcome::Failed(failure) = e.worker.run(job.id, &CancelToken::new()).await.unwrap() else {
         panic!("expected failure");
     };
@@ -543,7 +585,10 @@ async fn available_backend_goes_through_repairing() {
         }
     }
     let worker = e.worker.with_parity(Shared(parity.clone()));
-    let job = worker.enqueue(nzb.as_bytes(), "x", None).await.unwrap();
+    let job = worker
+        .enqueue(nzb.as_bytes(), "x", None, None)
+        .await
+        .unwrap();
     let mut events = e.jobs.events().subscribe();
     let Outcome::Failed(failure) = worker.run(job.id, &CancelToken::new()).await.unwrap() else {
         panic!("expected failure");
@@ -578,7 +623,11 @@ async fn import_then_cleanup_removes_staging_and_output() {
     let posts = [post("a.mkv", payload(1200, 8))];
     let (nzb, articles) = release("Importable", &posts);
     let e = env(articles);
-    let job = e.worker.enqueue(nzb.as_bytes(), "x", None).await.unwrap();
+    let job = e
+        .worker
+        .enqueue(nzb.as_bytes(), "x", None, None)
+        .await
+        .unwrap();
     let mut download = ready(e.worker.run(job.id, &CancelToken::new()).await.unwrap()).await;
     download.movie_id = Some(reelarr_types::MovieId(1));
     let mut cleanups = CleanupRegistry::default();
@@ -597,7 +646,7 @@ async fn invalid_nzb_creates_no_job() {
     let e = env(HashMap::new());
     assert!(
         e.worker
-            .enqueue(b"<nzb>".as_slice(), "x", None)
+            .enqueue(b"<nzb>".as_slice(), "x", None, None)
             .await
             .is_err()
     );

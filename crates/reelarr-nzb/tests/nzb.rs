@@ -183,10 +183,10 @@ async fn store_roundtrip_and_worker_restart_resume() {
     let id = JobId::new();
     assert!(backend.load(id).await.unwrap().is_none());
     let doc = read(VALID).unwrap();
-    backend.insert(id, doc.clone()).await.unwrap();
+    backend.insert(id, doc.clone(), None).await.unwrap();
     assert!(backend.load(id).await.unwrap().unwrap().document == doc);
     assert!(matches!(
-        backend.insert(id, doc).await,
+        backend.insert(id, doc, None).await,
         Err(StoreError::AlreadyExists)
     ));
     let first = SegmentKey {
@@ -232,7 +232,7 @@ async fn invalid_batches_are_atomic_and_jobs_isolated() {
     let store = InMemoryNzbStore::default();
     let [j1, j2, j3, j4] = [JobId::new(), JobId::new(), JobId::new(), JobId::new()];
     for id in [j1, j2] {
-        store.insert(id, read(VALID).unwrap()).await.unwrap();
+        store.insert(id, read(VALID).unwrap(), None).await.unwrap();
     }
     let valid = SegmentKey {
         file_index: 0,
@@ -284,7 +284,7 @@ async fn invalid_batches_are_atomic_and_jobs_isolated() {
         store.checkpoint(j3, &[]).await,
         Err(StoreError::NotFound)
     ));
-    assert!(store.insert(j4, Default::default()).await.is_err());
+    assert!(store.insert(j4, Default::default(), None).await.is_err());
     let mut corrupted = store.load(j1).await.unwrap().unwrap();
     corrupted.completed.insert(SegmentKey {
         file_index: 90,
@@ -301,4 +301,18 @@ fn illegal_xml_characters_and_duplicate_declarations() {
     }
     assert!(read(&format!("<?xml version=\"1.0\"?>{VALID}")).is_err());
     assert!(read(&format!("&#32;{VALID}")).is_err());
+}
+
+#[tokio::test]
+async fn store_keeps_movie_id_and_remove_is_idempotent() {
+    let store = InMemoryNzbStore::default();
+    let id = JobId::new();
+    let movie = Some(reelarr_types::MovieId(7));
+    store.insert(id, read(VALID).unwrap(), movie).await.unwrap();
+    assert_eq!(store.load(id).await.unwrap().unwrap().movie_id, movie);
+    store.remove(id).await.unwrap();
+    assert!(store.load(id).await.unwrap().is_none());
+    store.remove(id).await.unwrap();
+    // The ID is free again after removal.
+    store.insert(id, read(VALID).unwrap(), None).await.unwrap();
 }
