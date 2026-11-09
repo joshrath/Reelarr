@@ -15,3 +15,30 @@ services:
       - /path/to/media:/media
       - /path/to/downloads:/downloads
     restart: unless-stopped
+
+# Optional extra NAS library roots (see docs/deployment.md). Keep /config local.
+# Add either/both below to services.reelarr.volumes; :ro is safe for adoption.
+#   - movies_nfs:/media/movies:ro
+#   - movies_smb:/media/movies-4k:ro
+# To allow opted-in imports, change :ro to :rw and grant NAS write permissions.
+# Docker mounts these on the host: no privileged/cap_add/SYS_ADMIN is needed.
+# Set PUID/PGID to the NAS owner; Reelarr never chowns library roots.
+#
+# volumes:
+#   movies_nfs:
+#     driver: local
+#     driver_opts:
+#       type: nfs
+#       o: addr=192.0.2.10,nfsvers=4,rw,hard
+#       device: ":/exports/movies"
+#   movies_smb:
+#     driver: local
+#     driver_opts:
+#       type: cifs
+#       device: "//192.0.2.20/movies-4k"
+#       # Load credentials from a protected host-only env file, not inline YAML:
+#       # docker compose --env-file /etc/reelarr/smb.env up --build
+#       # Resolved credentials ARE visible to Docker admins in volume metadata.
+#       # Kernel CIFS does NOT support credentials=; for that use a host mount
+#       # and bind as documented in docs/deployment.md.
+#       o: "addr=192.0.2.20,vers=3.0,username=${SMB_USERNAME:?set in host-only env file},password=${SMB_PASSWORD:?set in host-only env file},uid=${PUID:-1000},gid=${PGID:-1000},file_mode=0644,dir_mode=0755,rw"
