@@ -33,6 +33,10 @@ pub struct LedgerEntry {
 }
 
 /// The `import_ledger` table.
+///
+/// `job_id` is not a foreign key to `jobs`, so a jobs-table rebuild cannot
+/// cascade-delete a pending import. A later pass should delete orphans:
+/// `DELETE FROM import_ledger WHERE job_id NOT IN (SELECT id FROM jobs)`.
 #[derive(Debug, Clone)]
 pub struct SqliteImportLedger {
     db: Database,

@@ -269,7 +269,7 @@ impl<M: MovieStore, F: MediaFileStore, P: Prober, R: ReleaseMatcher> Importer<M,
         let mode = self.options.mode;
         let dest_dir = dest.parent().map(Path::to_owned).unwrap_or_default();
         let (src, dst) = (prepared.source.clone(), dest.to_owned());
-        let transferred = blocking(move || {
+        let transferred = blocking_write(move || {
             std::fs::create_dir_all(&dest_dir)?;
             transfer::transfer(&src, &dst, mode)
         })
@@ -449,35 +449,44 @@ impl From<StoreError> for Failure {
     }
 }
 
-// Linux errnos for library write failures.
-const EPERM: i32 = 1;
-const EIO: i32 = 5;
-const EACCES: i32 = 13;
-const ENOSPC: i32 = 28;
-const EROFS: i32 = 30;
-const ENOTCONN: i32 = 107;
-const ETIMEDOUT: i32 = 110;
-const EHOSTDOWN: i32 = 112;
-const EHOSTUNREACH: i32 = 113;
-const ESTALE: i32 = 116;
-
 impl From<std::io::Error> for Failure {
-    /// Disk full and a vanished share are worth retrying; a read-only or
-    /// forbidden library and an existing destination are not.
+    /// Used for download-side and other non-library I/O. Library write
+    /// failures go through [`Failure::from_library_io`] so an EACCES or EIO
+    /// on the download is not reported as a library permission or offline root.
     fn from(e: std::io::Error) -> Self {
         if e.kind() == std::io::ErrorKind::AlreadyExists {
             return Self::permanent(format!("not overwriting existing library file: {e}"))
                 .with_code(FailureCode::DestinationConflict);
         }
+        Self::retryable(format!("file operation failed: {e}"))
+    }
+}
+
+impl Failure {
+    /// Maps errors from writing into a library root: disk full and a vanished
+    /// share are worth retrying; a read-only or forbidden library and an
+    /// existing destination are not.
+    fn from_library_io(e: std::io::Error) -> Self {
+        if e.kind() == std::io::ErrorKind::AlreadyExists {
+            return Self::permanent(format!("not overwriting existing library file: {e}"))
+                .with_code(FailureCode::DestinationConflict);
+        }
         match e.raw_os_error() {
-            Some(ENOSPC) => {
+            Some(code) if code == libc::ENOSPC => {
                 Self::retryable(format!("library is full: {e}")).with_code(FailureCode::DiskFull)
             }
-            Some(EROFS | EACCES | EPERM) => {
+            Some(code) if code == libc::EROFS || code == libc::EACCES || code == libc::EPERM => {
                 Self::permanent(format!("library refused the write: {e}"))
                     .with_code(FailureCode::LibraryPermissionDenied)
             }
-            Some(ESTALE | ENOTCONN | EIO | EHOSTDOWN | EHOSTUNREACH | ETIMEDOUT) => {
+            Some(code)
+                if code == libc::ESTALE
+                    || code == libc::ENOTCONN
+                    || code == libc::EIO
+                    || code == libc::EHOSTDOWN
+                    || code == libc::EHOSTUNREACH
+                    || code == libc::ETIMEDOUT =>
+            {
                 Self::retryable(format!("library share is unavailable: {e}"))
                     .with_code(FailureCode::RootOffline)
             }
@@ -493,4 +502,41 @@ async fn blocking<T: Send + 'static>(
         .await
         .map_err(|e| Failure::retryable(format!("import task failed: {e}")))?
         .map_err(Failure::from)
+}
+
+async fn blocking_write<T: Send + 'static>(
+    f: impl FnOnce() -> std::io::Result<T> + Send + 'static,
+) -> Result<T, Failure> {
+    tokio::task::spawn_blocking(f)
+        .await
+        .map_err(|e| Failure::retryable(format!("import task failed: {e}")))?
+        .map_err(Failure::from_library_io)
+}
+
+#[cfg(test)]
+mod errno_tests {
+    use super::*;
+
+    #[test]
+    fn download_errors_are_not_mapped_as_library_failures() {
+        let denied = Failure::from(std::io::Error::from_raw_os_error(libc::EACCES));
+        assert!(denied.retryable);
+        assert_eq!(denied.code, None);
+        let io = Failure::from(std::io::Error::from_raw_os_error(libc::EIO));
+        assert!(io.retryable);
+        assert_eq!(io.code, None);
+    }
+
+    #[test]
+    fn library_writes_map_errnos() {
+        let denied = Failure::from_library_io(std::io::Error::from_raw_os_error(libc::EACCES));
+        assert!(!denied.retryable);
+        assert_eq!(denied.code, Some(FailureCode::LibraryPermissionDenied));
+        let full = Failure::from_library_io(std::io::Error::from_raw_os_error(libc::ENOSPC));
+        assert!(full.retryable);
+        assert_eq!(full.code, Some(FailureCode::DiskFull));
+        let stale = Failure::from_library_io(std::io::Error::from_raw_os_error(libc::ESTALE));
+        assert!(stale.retryable);
+        assert_eq!(stale.code, Some(FailureCode::RootOffline));
+    }
 }

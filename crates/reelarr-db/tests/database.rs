@@ -180,3 +180,100 @@ fn expected_migrations() -> i64 {
         .filter(|e| e.path().extension().is_some_and(|x| x == "sql"))
         .count() as i64
 }
+
+/// Regression (#79 review): 0005 rebuilds `jobs` to widen the failure_code
+/// CHECK. Existing rows must survive, both indexes must come back, and the
+/// new codes must be accepted, with foreign keys on.
+#[tokio::test]
+async fn jobs_rebuild_keeps_existing_rows_and_accepts_new_codes() {
+    use sqlx::migrate::Migrate;
+
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("reelarr.db");
+    let options = SqliteConnectOptions::new()
+        .filename(&path)
+        .create_if_missing(true)
+        .foreign_keys(true);
+    let pool = SqlitePoolOptions::new()
+        .connect_with(options)
+        .await
+        .unwrap();
+    {
+        let mut conn = pool.acquire().await.unwrap();
+        conn.ensure_migrations_table().await.unwrap();
+        for migration in sqlx::migrate!("./migrations").iter() {
+            if migration.version > 4 {
+                break;
+            }
+            conn.apply(migration).await.unwrap();
+        }
+    }
+
+    let seq = 1u64.to_be_bytes().to_vec();
+    sqlx::query(
+        "INSERT INTO jobs (id, kind, state, title, priority, queue_position, category,          failure_code, failure_message, failure_retryable, attempts, resume_state,          resume_hint, created_at, updated_at, event_seq, seq_reserved, recovery_path)          VALUES          ('job-ok', 'nzb', 'completed', 'Done', 1, ?, NULL,           NULL, NULL, NULL, 1, NULL, NULL, 10, 10, ?, ?, NULL),          ('job-fail', 'nzb', 'failed', 'Full', 1, ?, NULL,           'disk_full', 'disk full', 1, 2, NULL, NULL, 11, 11, ?, ?, NULL)",
+    )
+    .bind(&seq)
+    .bind(&seq)
+    .bind(&seq)
+    .bind(&seq)
+    .bind(&seq)
+    .bind(&seq)
+    .execute(&pool)
+    .await
+    .unwrap();
+    pool.close().await;
+
+    let db = Database::connect(&path).await.unwrap();
+    let count = sqlx::query("SELECT COUNT(*) AS n FROM jobs")
+        .fetch_one(db.pool())
+        .await
+        .unwrap()
+        .get::<i64, _>("n");
+    assert_eq!(count, 2);
+    let code: String = sqlx::query("SELECT failure_code FROM jobs WHERE id = 'job-fail'")
+        .fetch_one(db.pool())
+        .await
+        .unwrap()
+        .get("failure_code");
+    assert_eq!(code, "disk_full");
+    let title: String = sqlx::query("SELECT title FROM jobs WHERE id = 'job-ok'")
+        .fetch_one(db.pool())
+        .await
+        .unwrap()
+        .get("title");
+    assert_eq!(title, "Done");
+
+    let indexes: Vec<String> = sqlx::query(
+        "SELECT name FROM sqlite_master WHERE type = 'index' AND tbl_name = 'jobs' ORDER BY name",
+    )
+    .fetch_all(db.pool())
+    .await
+    .unwrap()
+    .into_iter()
+    .map(|row| row.get::<String, _>("name"))
+    .collect();
+    assert!(indexes.iter().any(|n| n == "jobs_state_idx"), "{indexes:?}");
+    assert!(indexes.iter().any(|n| n == "jobs_queue_idx"), "{indexes:?}");
+
+    let fk = sqlx::query("PRAGMA foreign_key_check")
+        .fetch_all(db.pool())
+        .await
+        .unwrap();
+    assert!(
+        fk.is_empty(),
+        "foreign_key_check returned {} row(s)",
+        fk.len()
+    );
+
+    sqlx::query(
+        "INSERT INTO jobs (id, kind, state, title, priority, queue_position, category,          failure_code, failure_message, failure_retryable, attempts, resume_state,          resume_hint, created_at, updated_at, event_seq, seq_reserved, recovery_path)          VALUES ('job-conflict', 'nzb', 'failed', 'Clash', 1, ?, NULL,          'destination_conflict', 'exists', 0, 1, NULL, NULL, 12, 12, ?, ?, NULL)",
+    )
+    .bind(&seq)
+    .bind(&seq)
+    .bind(&seq)
+    .execute(db.pool())
+    .await
+    .unwrap();
+    db.pool().close().await;
+}
