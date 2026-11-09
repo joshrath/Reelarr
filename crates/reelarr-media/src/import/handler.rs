@@ -22,11 +22,14 @@ use std::path::{Path, PathBuf};
 use async_trait::async_trait;
 use reelarr_core::{CompletedDownload, FailureCode, ImportHandler, ImportResult};
 use reelarr_db::Database;
-use reelarr_types::{LibraryRoot, LibraryRootId, LibraryRootKind, MediaFileStatus, MovieId};
+use reelarr_types::{
+    LibraryRoot, LibraryRootId, LibraryRootKind, MediaFileStatus, MediaKind, MovieId,
+};
 
 use super::{
     DEFAULT_TEMPLATE, Failure, ImportOptions, ImportRequest, Importer, Prepared, ReleaseMatcher,
-    TransferMode, blocking, transfer::partial_path,
+    TransferMode, blocking,
+    transfer::{self, dest_tree_complete, partial_path, tree_payload_size},
 };
 use crate::db::{
     LedgerEntry, LedgerState, SqliteImportLedger, SqliteLibraryRootStore, SqliteMediaFileStore,
@@ -118,14 +121,43 @@ impl<P: Prober, R: ReleaseMatcher> MediaImportHandler<P, R> {
             // with no known files still looks Online, so dest NotFound or
             // unreadable is retryable RootOffline rather than "data lost".
             // Wrong-size dest (or a non-file) is a permanent conflict.
-            if entry.mode == TransferMode::Move && !exists(Path::new(&entry.source_path)).await {
+            //
+            // Disc-folder moves are checked even when the source path still
+            // exists: `remove_tree_sources` used to leave an empty walk-root
+            // folder, and prepare then reported "no importable video". If
+            // the dest tree is complete, finish from the ledger and clean
+            // up that leftover source. An incomplete dest with the source
+            // still present falls through so place() can resume.
+            let source_gone = !exists(Path::new(&entry.source_path)).await;
+            if entry.mode == TransferMode::Move
+                && (source_gone || entry.kind == MediaKind::DiscFolder)
+            {
                 let dest = PathBuf::from(&entry.dest_path);
                 let root = self.root(entry.root_id).await?;
                 self.check_health(&root).await?;
-                match tokio::fs::metadata(&dest).await {
-                    Ok(meta) if meta.is_file() && meta.len() == entry.size_bytes => {
+                let dest_ok = if entry.kind == MediaKind::DiscFolder {
+                    let dest_buf = dest.clone();
+                    let expected = entry.size_bytes;
+                    match tokio::task::spawn_blocking(move || {
+                        dest_tree_complete(&dest_buf, expected)
+                    })
+                    .await
+                    {
+                        Ok(inner) => inner,
+                        Err(e) => Err(std::io::Error::other(e.to_string())),
+                    }
+                } else {
+                    tokio::fs::metadata(&dest)
+                        .await
+                        .map(|meta| meta.is_file() && meta.len() == entry.size_bytes)
+                };
+                match dest_ok {
+                    Ok(true) => {
                         ensure_dest_inside(&root, &dest).await?;
                         let _ = tokio::fs::remove_file(partial_path(&dest)).await;
+                        if entry.kind == MediaKind::DiscFolder {
+                            cleanup_leftover_source(Path::new(&entry.source_path)).await;
+                        }
                         let probe = if entry.kind.is_disc() {
                             None
                         } else {
@@ -138,13 +170,15 @@ impl<P: Prober, R: ReleaseMatcher> MediaImportHandler<P, R> {
                         self.ledger.mark_done(&job, id).await?;
                         return Ok(ImportResult::Imported { media_file_id: id });
                     }
-                    Ok(_) => {
+                    Ok(false) if source_gone => {
                         return Err(Failure::permanent(format!(
                             "a different file already exists at {}",
                             dest.display()
                         ))
                         .with_code(FailureCode::DestinationConflict));
                     }
+                    Ok(false) => {}
+                    Err(e) if e.kind() == std::io::ErrorKind::NotFound && !source_gone => {}
                     Err(e) => {
                         return Err(Failure::retryable(format!(
                             "library folder {} is unavailable: {e}",
@@ -186,10 +220,18 @@ impl<P: Prober, R: ReleaseMatcher> MediaImportHandler<P, R> {
         self.check_health(&root).await?;
         ensure_dest_inside(&root, &dest).await?;
 
-        let size_bytes = tokio::fs::metadata(&prepared.source)
-            .await
-            .map_err(Failure::from)?
-            .len();
+        let size_bytes = if prepared.kind == MediaKind::DiscFolder {
+            let source = prepared.source.clone();
+            tokio::task::spawn_blocking(move || tree_payload_size(&source))
+                .await
+                .map_err(|e| Failure::retryable(format!("import task failed: {e}")))?
+                .map_err(Failure::from)?
+        } else {
+            tokio::fs::metadata(&prepared.source)
+                .await
+                .map_err(Failure::from)?
+                .len()
+        };
         self.ledger
             .put_pending(&LedgerEntry {
                 job_id: job.clone(),
@@ -227,9 +269,25 @@ impl<P: Prober, R: ReleaseMatcher> MediaImportHandler<P, R> {
     ) -> Result<(), Failure> {
         let partial = partial_path(dest);
         let _ = tokio::fs::remove_file(&partial).await;
-        if tokio::fs::symlink_metadata(dest).await.is_err() {
-            self.importer.transfer_into(prepared, dest).await?;
-            return Ok(());
+        match tokio::fs::symlink_metadata(dest).await {
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                self.importer.transfer_into(prepared, dest).await?;
+                return Ok(());
+            }
+            Err(e) => return Err(Failure::from(transfer::TransferError::Dest(e))),
+            Ok(meta) if prepared.kind == MediaKind::DiscFolder => {
+                if !meta.is_dir() || !resume {
+                    return Err(Failure::permanent(format!(
+                        "a different file already exists at {}",
+                        dest.display()
+                    ))
+                    .with_code(FailureCode::DestinationConflict));
+                }
+                // Resume an incomplete tree: fill missing files, refuse mismatches.
+                self.importer.transfer_into(prepared, dest).await?;
+                return Ok(());
+            }
+            Ok(_) => {}
         }
         // Without a pending row, an identical file at the destination is
         // still someone else's as far as this job is concerned.
@@ -414,6 +472,20 @@ fn dest_stays_inside(root: &Path, dest: &Path) -> std::io::Result<bool> {
 
 async fn exists(path: &Path) -> bool {
     tokio::fs::symlink_metadata(path).await.is_ok()
+}
+
+/// Best-effort cleanup of a leftover download tree after a finished move
+/// whose destination is already complete.
+async fn cleanup_leftover_source(path: &Path) {
+    match tokio::fs::symlink_metadata(path).await {
+        Ok(meta) if meta.is_dir() => {
+            let _ = tokio::fs::remove_dir_all(path).await;
+        }
+        Ok(_) => {
+            let _ = tokio::fs::remove_file(path).await;
+        }
+        Err(_) => {}
+    }
 }
 
 /// Whether `dest` is the transfer of `src`: the same inode (a hardlink), or

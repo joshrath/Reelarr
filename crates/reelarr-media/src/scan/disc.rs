@@ -120,6 +120,9 @@ pub fn folder_size(dir: &Path, limits: FolderLimits) -> Result<(u64, i64), Strin
         if !entry.file_type().is_file() {
             continue;
         }
+        if !super::is_scannable_name(entry.path()) {
+            continue;
+        }
         let meta = entry.metadata().map_err(|e| e.to_string())?;
         total = total.saturating_add(meta.len());
         let modified = meta
