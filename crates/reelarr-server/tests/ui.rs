@@ -91,7 +91,11 @@ async fn old_paths_redirect_to_renamed_sections() {
             .oneshot(Request::get(from).body(Body::empty()).unwrap())
             .await
             .unwrap();
-        assert!(res.status().is_redirection(), "{from}: {}", res.status());
+        assert_eq!(
+            res.status(),
+            axum::http::StatusCode::PERMANENT_REDIRECT,
+            "{from}"
+        );
         assert_eq!(res.headers()["location"], to, "{from}");
     }
 }

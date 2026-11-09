@@ -19,7 +19,7 @@ pub fn Header() -> AnyView {
 
     // Ctrl/⌘+K opens search; Escape closes the menu and the drawer.
     let navigate = use_navigate();
-    let handle = window_event_listener(ev::keydown, move |e| {
+    let key_handle = window_event_listener(ev::keydown, move |e| {
         if (e.ctrl_key() || e.meta_key()) && e.key().eq_ignore_ascii_case("k") {
             e.prevent_default();
             navigate(SEARCH_PATH, Default::default());
@@ -28,7 +28,32 @@ pub fn Header() -> AnyView {
             drawer_open.set(false);
         }
     });
-    on_cleanup(move || handle.remove());
+    // Click outside dismisses the account menu and the nav drawer.
+    let click_handle = window_event_listener(ev::click, move |e| {
+        if !menu_open.get_untracked() && !drawer_open.get_untracked() {
+            return;
+        }
+        let Some(target) = e.target() else {
+            return;
+        };
+        use web_sys::wasm_bindgen::JsCast;
+        let Ok(el) = target.dyn_into::<web_sys::Element>() else {
+            return;
+        };
+        let in_account = el.closest(".account").ok().flatten().is_some();
+        let in_drawer_ui = el.closest("#nav-drawer").ok().flatten().is_some()
+            || el.closest(".drawer-toggle").ok().flatten().is_some();
+        if menu_open.get_untracked() && !in_account {
+            menu_open.set(false);
+        }
+        if drawer_open.get_untracked() && !in_drawer_ui {
+            drawer_open.set(false);
+        }
+    });
+    on_cleanup(move || {
+        key_handle.remove();
+        click_handle.remove();
+    });
 
     view! {
         <header class="app-header">
@@ -46,7 +71,7 @@ pub fn Header() -> AnyView {
                 <MainNav class="main-nav-bar" />
                 <a class="header-search" href=SEARCH_PATH>
                     <Icon name=IconName::Search />
-                    <span class="header-search-text">"_Search archive…"</span>
+                    <span class="header-search-text">"Search archive…"</span>
                     <kbd aria-label="Shortcut: Control or Command K">"⌘K"</kbd>
                 </a>
                 <div class="header-tools">
@@ -144,7 +169,10 @@ fn AccountMenu(open: RwSignal<bool>) -> AnyView {
                     type="button"
                     class="menu-item"
                     aria-pressed=move || prefs.0.get().crt.to_string()
-                    on:click=move |_| prefs.toggle_crt()
+                    on:click=move |_| {
+                        prefs.toggle_crt();
+                        open.set(false);
+                    }
                 >
                     <span class="menu-item-label">
                         <Icon name=IconName::Tv />
