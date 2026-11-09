@@ -31,3 +31,18 @@ The UI is written in Rust with [Leptos](https://leptos.dev). No React, and no Ja
 - Routing: `/health` and `/api/v1/*` belong to the server. Leptos server functions, if added, go under `/api/v1/fn/`. Everything else falls back to the UI, except unknown `/api/*` paths, which return a JSON 404.
 
 Run `cargo leptos watch` for a live-reloading dev server.
+
+## Protected API router convention
+
+Merge domain routers into `protected` in `reelarr-server::api::router` **before**
+applying `.route_layer(middleware::from_fn_with_state(state, require_auth))`.
+Never call `.layer()` on an empty router and merge domain routes afterwards:
+Axum layers wrap only routes already present. Keep setup/login/session endpoints
+in the public auth router, and merge that router separately. See the fix in
+[PR #50](https://github.com/joshrath/Reelarr/pull/50) and the
+[auth boundary (#7)](https://github.com/joshrath/Reelarr/issues/7).
+
+The API router's unit regression merges a test-only domain route at this exact
+composition point. It requires the middleware-inserted `AuthUser` extension (not
+an extractor fallback), asserting anonymous `401` with the `ApiError` JSON body
+and authenticated success. Keep this test when adding new domain routers.
