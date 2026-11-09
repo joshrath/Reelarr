@@ -28,10 +28,11 @@ pub struct Progress {
 /// State of one protected file.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum FileStatus {
-    /// Length and full MD5 match.
+    /// The declared length and full MD5 match. Extra bytes past the end are
+    /// ignored: they don't make the file damaged.
     Intact,
-    /// Found, but these zero-based slices don't match. An empty list means
-    /// every slice matches and only trailing bytes past the end differ.
+    /// Found, but these zero-based slices don't match. An empty list means no
+    /// mismatched slice checksum was found (for example the set has no IFSC).
     Damaged {
         /// Mismatching or absent slice indices.
         bad_slices: Vec<u64>,
@@ -344,7 +345,7 @@ fn verify_set(
         let desc = &set.files[id];
         let cand = &candidates[i];
         files[k].found_as = Some(cand.name.clone());
-        let intact = cand.len == desc.length
+        let intact = cand.len >= desc.length
             && full_md5(dir, &cand.name, desc.length, cancel, meter)? == desc.md5;
         files[k].status = if intact {
             FileStatus::Intact

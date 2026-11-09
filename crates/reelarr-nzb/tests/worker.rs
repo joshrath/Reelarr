@@ -737,3 +737,61 @@ async fn par2_verify_reports_an_unrepairable_release() {
         "{message}"
     );
 }
+
+fn corrupt_whole_file_crc(body: &mut [u8]) {
+    let key = b" crc32=";
+    let pos = body.windows(key.len()).rposition(|w| w == key).unwrap() + key.len();
+    body[pos] = if body[pos] == b'0' { b'1' } else { b'0' };
+}
+
+#[tokio::test]
+async fn par2_verify_keeps_a_crc_mismatch_as_partial() {
+    let posts = [
+        post("movie.mkv", par2_fixture("movie.mkv")),
+        post("notes.nfo", par2_fixture("notes.nfo")),
+        post("basic.par2", par2_fixture("basic.par2")),
+        post("basic.vol00+04.par2", par2_fixture("basic.vol00+04.par2")),
+    ];
+    let (nzb, mut articles) = release("Par2 Release", &posts);
+    // Every article is present; only the advertised whole-file CRC is wrong.
+    for id in ids(0, &posts[0]) {
+        corrupt_whole_file_crc(articles.get_mut(&id).unwrap());
+    }
+    let e = env(articles);
+    let worker = NzbWorker::new(
+        e.jobs.clone(),
+        InMemoryNzbStore::default(),
+        e.source.clone(),
+        WorkerConfig::new(&e.staging, &e.output),
+    )
+    .with_parity(Par2Verify::default());
+    let job = worker
+        .enqueue(nzb.as_bytes(), "x", None, None)
+        .await
+        .unwrap();
+    let Outcome::Failed(failure) = worker.run(job.id, &CancelToken::new()).await.unwrap() else {
+        panic!("expected failure");
+    };
+    assert_eq!(failure.code, FailureCode::RepairFailed);
+    assert!(failure.message.starts_with(REPAIR_UNAVAILABLE));
+    // The payload is intact, so PAR2 must not treat the file as Missing
+    // (movie.mkv is 25 slices). The yEnc CRC failure still marks it damaged.
+    assert!(
+        failure
+            .message
+            .contains("PAR2 reports the protected files intact")
+            || failure.message.contains("needs 0 recovery"),
+        "{}",
+        failure.message
+    );
+    assert!(
+        !failure.message.contains("needs 25") && !failure.message.contains("needs 24"),
+        "{}",
+        failure.message
+    );
+    let kept = e
+        .staging
+        .join(job.id.to_string())
+        .join("partial/0/movie.mkv");
+    assert_eq!(fs::read(&kept).unwrap(), par2_fixture("movie.mkv"));
+}

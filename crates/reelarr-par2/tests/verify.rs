@@ -116,24 +116,15 @@ fn truncated_file_needs_its_tail() {
 }
 
 #[test]
-fn trailing_junk_needs_no_blocks() {
+fn trailing_junk_is_intact() {
     let dir = stage(&["basic"]);
     let path = dir.path().join("notes.nfo");
     let mut bytes = fs::read(&path).unwrap();
     bytes.extend_from_slice(b"junk");
     fs::write(&path, bytes).unwrap();
     let report = run(dir.path());
-    assert_eq!(
-        file(&report, "notes.nfo").status,
-        FileStatus::Damaged { bad_slices: vec![] }
-    );
-    assert_eq!(
-        report.primary().unwrap().outcome,
-        Outcome::Repairable {
-            needed: 0,
-            available: 4
-        }
-    );
+    assert_eq!(file(&report, "notes.nfo").status, FileStatus::Intact);
+    assert_eq!(report.primary().unwrap().outcome, Outcome::Valid);
 }
 
 #[test]
@@ -314,6 +305,32 @@ fn budgets_are_enforced() {
     };
     let err = verify_dir(dir.path(), &limits, &AtomicBool::new(false), &mut |_| {});
     assert!(matches!(err, Err(Error::Limit("packets"))));
+}
+
+#[test]
+fn scan_does_not_search_past_max_scan_bytes() {
+    let real = fs::read(fixture("basic").join("basic.par2")).unwrap();
+    let mut data = vec![0u8; 16 * 1024];
+    data.extend_from_slice(&real);
+    let limits = Limits {
+        max_scan_bytes: 8 * 1024,
+        ..Limits::default()
+    };
+    let mut packets = Packets::default();
+    packets
+        .scan(Cursor::new(&data), &limits, &AtomicBool::new(false))
+        .unwrap();
+    assert_eq!(packets.accepted, 0);
+
+    let mut packets = Packets::default();
+    packets
+        .scan(
+            Cursor::new(&data),
+            &Limits::default(),
+            &AtomicBool::new(false),
+        )
+        .unwrap();
+    assert!(packets.accepted > 0);
 }
 
 // ---- Hand-built hostile packets ----

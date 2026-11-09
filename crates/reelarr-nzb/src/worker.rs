@@ -46,7 +46,7 @@
 use crate::{
     JobId, NzbDocument, NzbFile, NzbStore, ParseError, ParseLimits, Segment, SegmentKey,
     StoreError,
-    assembly::{Assembler, AssemblyError},
+    assembly::{Assembler, AssemblyError, PartialFile},
     nntp, parse,
     yenc::{BodyEncoding, DecodeLimits},
 };
@@ -250,6 +250,11 @@ fn par2_verify(
         remove_all(&view)?;
         create_private_dir(&view)?;
         let mut names = BTreeSet::new();
+        // files/ first, then partial/. The view keeps the original basename so
+        // verify_dir can match FileDesc names. If two slots share a basename,
+        // the first wins (a completed file over a partial). Using index
+        // prefixes would break that name match, and a damaged first 16 KiB
+        // cannot fall back to the content hash either.
         for root in [FILES_DIR, PARTIAL_DIR] {
             let entries = match fs::read_dir(job_dir.join(root)) {
                 Err(e) if e.kind() == ErrorKind::NotFound => continue,
@@ -840,15 +845,28 @@ where
         }
         let target = job_dir.join(FILES_DIR).join(index.to_string());
         let stale = job_dir.join(PARTIAL_DIR).join(index.to_string());
+        let dir = job_dir.to_owned();
         let complete = run_blocking(move || -> Result<bool, Stop> {
-            match asm.finish() {
-                Ok(completed) => {
+            match asm.finish_or_partial() {
+                Ok(Ok(completed)) => {
                     publish_completed(completed.path(), &target)?;
                     remove_all(&stale)?;
                     Ok(true)
                 }
+                Ok(Err(partial)) => {
+                    if let Some(partial) = partial
+                        && let Err(e) = stash_kept(partial, &dir, index)
+                    {
+                        tracing::warn!(
+                            job = %id,
+                            file = index,
+                            error = %e,
+                            "could not keep partial file after a CRC or coverage failure"
+                        );
+                    }
+                    Ok(false)
+                }
                 Err(e @ (AssemblyError::Io(_) | AssemblyError::Store(_))) => Err(e.into()),
-                // Whole-file CRC mismatch or incomplete coverage.
                 Err(_) => Ok(false),
             }
         })
@@ -1255,14 +1273,17 @@ fn repair_message(verdict: &ParityVerdict, request: &RepairRequest, total: usize
 
 /// Keep a damaged file's validated bytes under `partial/<index>/` for repair.
 fn stash_partial(asm: Assembler, job_dir: &Path, index: usize) -> io::Result<()> {
+    match asm.keep_partial() {
+        Ok(Some(partial)) => stash_kept(partial, job_dir, index),
+        Ok(None) => Ok(()),
+        Err(AssemblyError::Io(e)) => Err(e),
+        Err(e) => Err(io::Error::other(e.to_string())),
+    }
+}
+
+fn stash_kept(partial: PartialFile, job_dir: &Path, index: usize) -> io::Result<()> {
     let slot = job_dir.join(PARTIAL_DIR).join(index.to_string());
     remove_all(&slot)?;
-    let partial = match asm.keep_partial() {
-        Ok(Some(partial)) => partial,
-        Ok(None) => return Ok(()),
-        Err(AssemblyError::Io(e)) => return Err(e),
-        Err(e) => return Err(io::Error::other(e.to_string())),
-    };
     let private = partial.path.parent().expect("assembly dir").to_owned();
     let result = (|| {
         create_private_dir(&slot)?;

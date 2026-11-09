@@ -45,6 +45,10 @@ pub struct Limits {
     pub max_slice_bytes: u64,
     /// Directory entries examined.
     pub max_dir_entries: usize,
+    /// Bytes examined while scanning one PAR2 file, including packet bodies and
+    /// resync searches. The rest of that file is skipped; packets already
+    /// accepted are kept. Caps work on a multi-gigabyte junk `.par2`.
+    pub max_scan_bytes: u64,
 }
 impl Default for Limits {
     fn default() -> Self {
@@ -57,6 +61,7 @@ impl Default for Limits {
             max_name_bytes: 4096,
             max_slice_bytes: 256 << 20,
             max_dir_entries: 100_000,
+            max_scan_bytes: 8 << 30,
         }
     }
 }

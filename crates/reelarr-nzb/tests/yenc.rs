@@ -521,7 +521,8 @@ fn multipart_crc_failure_then_retry_and_whole_crc_failure() {
         a.finish(),
         Err(AssemblyError::Decode(DecodeError::Crc))
     ));
-    assert_eq!(fs::read_dir(&dir.0).unwrap().count(), 0); // corrupt output discarded
+    // Written bytes are kept so a later repair has them.
+    assert_eq!(fs::read_dir(&dir.0).unwrap().count(), 1);
 }
 #[test]
 fn missing_multipart_total_is_supported() {
@@ -723,4 +724,33 @@ fn keep_partial_is_none_when_no_part_was_written() {
     let dir = Dir::new();
     let a = assembler(&dir, 1);
     assert!(a.keep_partial().unwrap().is_none());
+}
+
+#[test]
+fn finish_crc_mismatch_keeps_written_bytes() {
+    let dir = Dir::new();
+    let mut a = assembler(&dir, 2);
+    for (n, start) in [(1, 0), (2, 3)] {
+        a.add_part(
+            n,
+            encode(
+                b"abc",
+                "x",
+                Some((n, 2, start, 6)),
+                Some(0),
+                "\n",
+                false,
+                false,
+            )
+            .as_slice(),
+            BodyEncoding::Unstuffed,
+        )
+        .unwrap();
+    }
+    let Err(Some(partial)) = a.finish_or_partial().unwrap() else {
+        panic!("expected a kept partial");
+    };
+    assert_eq!(partial.file_size, 6);
+    assert!(partial.missing.is_empty());
+    assert_eq!(fs::read(&partial.path).unwrap(), b"abcabc");
 }

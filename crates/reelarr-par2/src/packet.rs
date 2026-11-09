@@ -107,6 +107,9 @@ impl Packets {
         let mut header = [0u8; HEADER as usize];
         loop {
             check(cancel)?;
+            if pos >= limits.max_scan_bytes {
+                return Ok(());
+            }
             input.seek(SeekFrom::Start(pos))?;
             if !read_full(&mut input, &mut header)? {
                 return Ok(());
@@ -117,7 +120,7 @@ impl Packets {
                     if header.starts_with(MAGIC) {
                         self.rejected += 1;
                     }
-                    match find_magic(&mut input, pos + 1, cancel)? {
+                    match find_magic(&mut input, pos + 1, limits.max_scan_bytes, cancel)? {
                         Some(next) => pos = next,
                         None => return Ok(()),
                     }
@@ -341,20 +344,30 @@ pub(crate) fn read_full<R: Read>(input: &mut R, buf: &mut [u8]) -> io::Result<bo
     }
     Ok(true)
 }
-/// Byte-wise forward search for the packet magic starting at `from`.
+/// Byte-wise forward search for the packet magic starting at `from`, stopping
+/// at `limit` so a huge junk file cannot be scanned end-to-end.
 fn find_magic<R: Read + Seek>(
     input: &mut R,
     from: u64,
+    limit: u64,
     cancel: &AtomicBool,
 ) -> Result<Option<u64>, Error> {
+    if from >= limit {
+        return Ok(None);
+    }
     input.seek(SeekFrom::Start(from))?;
     let mut window: Vec<u8> = Vec::with_capacity(CHUNK + MAGIC.len());
     let mut base = from;
     let mut buf = vec![0; CHUNK];
     loop {
         check(cancel)?;
+        let examined = base + window.len() as u64;
+        if examined >= limit {
+            return Ok(None);
+        }
+        let want = usize::try_from((limit - examined).min(CHUNK as u64)).expect("chunk fits");
         let n = loop {
-            match input.read(&mut buf) {
+            match input.read(&mut buf[..want]) {
                 Err(e) if e.kind() == io::ErrorKind::Interrupted => {}
                 other => break other?,
             }
