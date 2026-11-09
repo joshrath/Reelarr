@@ -21,7 +21,7 @@ use reelarr_db::{
 };
 use reelarr_nzb::{
     StoreError,
-    worker::{CancelToken, Outcome, RecoveryPaths, WorkerError},
+    worker::{CancelToken, Outcome, RecoveryPaths, WorkerConfig, WorkerError},
 };
 use reelarr_server::downloads::{
     BuildError, JobRunner, RunnerFactory, StartError, Supervisor, SupervisorConfig,
@@ -251,6 +251,7 @@ async fn env_at(dir: tempfile::TempDir, max: usize) -> Env {
         SqliteNzbStore::new(&db),
         nntp.clone(),
         Arc::new(Factory(shared.clone(), jobs.clone())),
+        WorkerConfig::new(dir.path().join("incomplete"), dir.path().join("complete")),
         config(max),
     );
     Env {

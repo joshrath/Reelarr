@@ -251,3 +251,37 @@ priority order, then queue position. A higher-priority job waits for a free slot
 and never interrupts a running one. On shutdown (SIGTERM or Ctrl-C) running
 downloads stop at a checkpoint and resume on the next start. Damaged downloads
 are checked with PAR2; repair itself is not supported yet.
+
+### Job API
+
+All routes need a signed-in session (401 otherwise). `POST` and `PUT` also need
+the `X-CSRF-Token` header matching the `reelarr_csrf` cookie (403 otherwise).
+
+| Method | Path | Purpose |
+| --- | --- | --- |
+| `GET` | `/api/v1/jobs` | All jobs in scheduling order: state, progress, failure, priority, queue position |
+| `GET` | `/api/v1/jobs/{id}` | One job |
+| `POST` | `/api/v1/jobs/upload` | Raw NZB as the body (32 MiB max, 413 `nzb_too_large` above it); optional `title`, `category`, `movie_id`, `priority` query parameters; 201 with the job |
+| `POST` | `/api/v1/jobs/release` | `{indexer, download_url, title, category?, movie_id?, priority?}`: fetch the NZB through that indexer's shared client and queue it; 201 with the job |
+| `POST` | `/api/v1/jobs/{id}/pause` | Pause a queued or downloading job |
+| `POST` | `/api/v1/jobs/{id}/resume` | Put a paused job back in the queue |
+| `POST` | `/api/v1/jobs/{id}/cancel` | Cancel, then remove the job's staging files once its run has stopped |
+| `PUT` | `/api/v1/jobs/{id}/priority` | `{priority: force\|high\|normal\|low}` |
+| `PUT` | `/api/v1/jobs/order` | `{job_ids: [...]}`: those unfinished jobs move to the front in that order, the rest keep their order behind them; one transaction |
+| `GET` | `/api/v1/jobs/events` | Server-Sent Events, below |
+
+Jobs sort by priority first, then queue position. A release `download_url`
+must be on the indexer's own origin or HTTPS to one of its
+`extra_download_hosts`, on every redirect; it is never echoed back or logged.
+Responses never include the NZB document, its archive passwords, indexer API
+keys or NNTP credentials.
+
+**Events.** The stream starts with an `event: snapshot` frame (`{"jobs": [...]}`,
+the same shape as `GET /api/v1/jobs`). Each following `event: job` frame is one
+job event with that job's `seq`; events at or below the job's snapshot
+`last_event_seq` are not sent. The server keeps a bounded buffer per stream. If
+a client falls behind, it receives a new `snapshot` frame and continues from
+there. Replace all job state on every `snapshot`. **This is not a durable
+replay log.** Frames have no SSE `id`, `Last-Event-ID` is ignored, and every
+reconnect starts with a fresh snapshot. Gaps in `seq` are normal, because
+progress is throttled and numbering skips ahead after a restart.

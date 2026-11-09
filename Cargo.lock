@@ -2723,11 +2723,13 @@ dependencies = [
  "async-trait",
  "axum",
  "crc32fast",
+ "futures-util",
  "http-body-util",
  "leptos",
  "rcgen",
  "reelarr-core",
  "reelarr-db",
+ "reelarr-indexer",
  "reelarr-media",
  "reelarr-nzb",
  "reelarr-stream",
@@ -2745,6 +2747,7 @@ dependencies = [
  "tower",
  "tracing",
  "tracing-subscriber",
+ "wiremock",
 ]
 
 [[package]]

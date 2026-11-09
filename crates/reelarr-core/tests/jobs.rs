@@ -217,3 +217,39 @@ fn core_events_convert_to_wasm_wire_dtos() {
         let _: reelarr_types::JobState = state.into();
     }
 }
+
+#[test]
+fn job_snapshot_converts_without_executor_details() {
+    let mut job = Job::new(JobKind::Nzb, "Movie (2024)");
+    job.priority = Priority::High;
+    job.queue_position = 4;
+    job.state = JobState::Failed;
+    job.failure = Some(Failure {
+        code: FailureCode::DestinationConflict,
+        message: "exists".into(),
+        retryable: false,
+    });
+    job.resume_hint = Some(CompletedStage::Downloading);
+    job.last_event_seq = 12;
+    let wire = reelarr_types::JobSnapshot::from(job.clone());
+    assert_eq!(wire.id, job.id.to_string());
+    assert_eq!(wire.priority, reelarr_types::Priority::High);
+    assert_eq!(wire.queue_position, 4);
+    assert_eq!(wire.state, reelarr_types::JobState::Failed);
+    assert_eq!(
+        wire.failure.unwrap().code,
+        reelarr_types::FailureCode::DestinationConflict
+    );
+    assert_eq!(wire.last_event_seq, 12);
+    let json = serde_json::to_value(reelarr_types::JobSnapshot::from(job)).unwrap();
+    assert!(json.get("resume_hint").is_none());
+    for priority in [
+        Priority::Force,
+        Priority::High,
+        Priority::Normal,
+        Priority::Low,
+    ] {
+        let wire: reelarr_types::Priority = priority.into();
+        assert_eq!(Priority::from(wire), priority);
+    }
+}

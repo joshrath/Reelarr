@@ -6,7 +6,10 @@ pub mod job;
 pub mod movie;
 pub mod nntp;
 pub mod playback;
-pub use job::{JobEvent, JobEventKind, JobState, Progress};
+pub use job::{
+    EnqueueReleaseRequest, Failure, FailureCode, JobEvent, JobEventKind, JobKind, JobList,
+    JobSnapshot, JobState, Priority, Progress, ReorderRequest, SetPriorityRequest, UploadNzbParams,
+};
 
 pub use movie::{
     Artwork, DEFAULT_RESCAN_INTERVAL_SECS, ExternalIds, LibraryRoot, LibraryRootId,

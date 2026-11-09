@@ -17,7 +17,7 @@ use tokio::sync::Mutex;
 
 use crate::Database;
 mod codec;
-use codec::{Snapshot, backend, decode, invalid, save};
+use codec::{Snapshot, backend, decode, invalid, save, uint};
 
 /// Reserve 256 sequence values at a time, never write progress values to SQLite.
 const SEQ_LEASE: u64 = 256;
@@ -53,6 +53,19 @@ pub(crate) struct JobRuntime {
     cache: Mutex<HashMap<JobId, Cached>>,
     events: EventHub,
     progress_interval: Duration,
+}
+
+/// Why [`SqliteJobStore::reorder`] changed nothing.
+#[derive(Debug, thiserror::Error)]
+pub enum ReorderError {
+    #[error("job listed more than once: {0}")]
+    Duplicate(JobId),
+    #[error("job not found: {0}")]
+    NotFound(JobId),
+    #[error("job has finished and is no longer queued: {0}")]
+    Finished(JobId),
+    #[error(transparent)]
+    Store(#[from] JobStoreError),
 }
 
 /// Clones and constructors using the same Database share one progress cache/event hub.
@@ -198,6 +211,130 @@ impl SqliteJobStore {
             Some((path,)) => Ok(path.map(PathBuf::from)),
             None => Err(JobStoreError::NotFound(id)),
         }
+    }
+
+    /// Move `front` to the head of the queue, in that order, in one
+    /// transaction. Every other unfinished job keeps its relative order after
+    /// them; finished jobs are not renumbered. Positions become 0, 1, 2, ...
+    /// Priority still sorts before position. Only jobs whose position changed
+    /// get a `Queue order updated` event (published after the commit). On any
+    /// error nothing is written. Returns the unfinished jobs in their new
+    /// order.
+    pub async fn reorder(&self, front: &[JobId]) -> Result<Vec<Job>, ReorderError> {
+        let mut seen = std::collections::HashSet::new();
+        if let Some(dup) = front.iter().find(|id| !seen.insert(**id)) {
+            return Err(ReorderError::Duplicate(*dup));
+        }
+        let mut cache = self.runtime.cache.lock().await;
+        let mut tx = self
+            .pool
+            .begin_with("BEGIN IMMEDIATE")
+            .await
+            .map_err(backend)?;
+        let rows =
+            sqlx::query("SELECT * FROM jobs ORDER BY priority, queue_position, created_at, id")
+                .fetch_all(&mut *tx)
+                .await
+                .map_err(backend)?;
+        let mut active = Vec::new();
+        let mut finished = std::collections::HashSet::new();
+        for row in rows {
+            let mut snapshot = decode(row)?;
+            let last_progress = self.overlay(&mut snapshot, &cache);
+            if snapshot.job.state.is_terminal() {
+                finished.insert(snapshot.job.id);
+            } else {
+                active.push((snapshot, last_progress));
+            }
+        }
+        for id in front {
+            if finished.contains(id) {
+                return Err(ReorderError::Finished(*id));
+            }
+            if !active.iter().any(|(s, _)| s.job.id == *id) {
+                return Err(ReorderError::NotFound(*id));
+            }
+        }
+        let mut ordered = Vec::with_capacity(active.len());
+        for id in front {
+            let index = active.iter().position(|(s, _)| s.job.id == *id).unwrap();
+            ordered.push(active.remove(index));
+        }
+        ordered.append(&mut active);
+        let mut changed = Vec::new();
+        for (position, (snapshot, _)) in ordered.iter_mut().enumerate() {
+            let position = position as u64;
+            if snapshot.job.queue_position == position {
+                continue;
+            }
+            snapshot.job.queue_position = position;
+            Self::allocate(snapshot)?;
+            save(&mut tx, &snapshot.job, snapshot.reserved, false).await?;
+            changed.push(snapshot.job.id);
+        }
+        tx.commit().await.map_err(backend)?;
+        for (snapshot, last_progress) in &mut ordered {
+            if changed.contains(&snapshot.job.id) {
+                snapshot.durable_seq = snapshot.job.last_event_seq;
+                cache.insert(
+                    snapshot.job.id,
+                    Cached::from_snapshot(snapshot, *last_progress),
+                );
+                self.publish(
+                    &snapshot.job,
+                    JobEventKind::Message {
+                        message: "Queue order updated".into(),
+                    },
+                );
+            }
+        }
+        let mut jobs: Vec<Job> = ordered.into_iter().map(|(s, _)| s.job).collect();
+        jobs.sort_by_key(|j| (j.priority, j.queue_position, j.created_at, j.id));
+        Ok(jobs)
+    }
+
+    /// Put a newly admitted job behind every unfinished job that was placed
+    /// with [`Self::reorder`] or `set_queue_order`. New jobs start at position
+    /// 0, which would otherwise sort them ahead of a reordered queue. A no-op
+    /// (no write, no event) while no other unfinished job has a position
+    /// above 0.
+    pub async fn append_to_queue(&self, id: JobId) -> Result<Job, JobStoreError> {
+        let mut cache = self.runtime.cache.lock().await;
+        let mut tx = self
+            .pool
+            .begin_with("BEGIN IMMEDIATE")
+            .await
+            .map_err(backend)?;
+        let mut snapshot = Self::load(&mut tx, id).await?;
+        let last_progress = self.overlay(&mut snapshot, &cache);
+        let rows = sqlx::query(
+            "SELECT queue_position FROM jobs WHERE id != ? \
+             AND state NOT IN ('completed', 'failed', 'cancelled')",
+        )
+        .bind(id.to_string())
+        .fetch_all(&mut *tx)
+        .await
+        .map_err(backend)?;
+        let mut max = 0;
+        for row in &rows {
+            max = max.max(uint(row, "queue_position")?);
+        }
+        if snapshot.job.state.is_terminal() || max == 0 || snapshot.job.queue_position > max {
+            return Ok(snapshot.job);
+        }
+        snapshot.job.queue_position = max.saturating_add(1);
+        Self::allocate(&mut snapshot)?;
+        save(&mut tx, &snapshot.job, snapshot.reserved, false).await?;
+        tx.commit().await.map_err(backend)?;
+        snapshot.durable_seq = snapshot.job.last_event_seq;
+        cache.insert(id, Cached::from_snapshot(&snapshot, last_progress));
+        self.publish(
+            &snapshot.job,
+            JobEventKind::Message {
+                message: "Queue order updated".into(),
+            },
+        );
+        Ok(snapshot.job)
     }
 
     /// Run after migrations and before binding/starting workers. Unreadable paths
