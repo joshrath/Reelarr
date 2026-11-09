@@ -65,6 +65,11 @@ Or with Docker:
 docker compose up --build
 ```
 
+See [container runtime](docs/container.md) for PUID/PGID, volume ownership,
+healthchecks and [bundled-tool licenses](docs/licenses.md).
+[NAS deployment examples](docs/deployment.md) cover NFS/SMB extra library roots
+and credential handling (deployment portion of #59).
+
 ## Roadmap
 
 0. Foundations

@@ -2522,10 +2522,13 @@ name = "reelarr-media"
 version = "0.0.1"
 dependencies = [
  "futures-util",
+ "reelarr-db",
+ "reelarr-stream",
  "reelarr-types",
  "reqwest 0.12.28",
  "serde",
  "serde_json",
+ "sqlx",
  "tempfile",
  "thiserror 2.0.21",
  "tokio",
@@ -2564,6 +2567,7 @@ dependencies = [
  "leptos",
  "reelarr-core",
  "reelarr-db",
+ "reelarr-media",
  "reelarr-stream",
  "reelarr-types",
  "reelarr-ui",
