@@ -39,6 +39,6 @@ VOLUME ["/config", "/media", "/downloads"]
 EXPOSE 7979
 USER 1000:1000
 HEALTHCHECK --interval=10s --timeout=5s --start-period=30s --retries=3 \
-    CMD ["/usr/local/bin/reelarr", "healthcheck"]
+    CMD ["/usr/local/bin/reelarr-entrypoint", "/usr/local/bin/reelarr", "healthcheck"]
 ENTRYPOINT ["/usr/bin/tini", "--", "/usr/local/bin/reelarr-entrypoint"]
 CMD ["reelarr"]

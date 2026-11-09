@@ -32,7 +32,8 @@ container/bootstrap essentials, not application/media dependencies.
   drops them; do not use `--cap-drop ALL` with that mode. Direct non-root mode
   works with `--cap-drop ALL --security-opt no-new-privileges`.
 
-`REELARR_PORT` defaults to 7979. Docker's exec-form HEALTHCHECK calls the Rust
+`REELARR_PORT` defaults to 7979. Docker's exec-form HEALTHCHECK uses the same privilege-drop entrypoint (including
+when Compose bootstraps as root), then calls the Rust
 `reelarr healthcheck` command, which probes `http://127.0.0.1:$REELARR_PORT/health`
 with bounded connect/read/write timeouts. It does not open a database or require
 curl. Startup failures (including migrations/permissions) cannot pass the probe.
