@@ -3,7 +3,7 @@ use std::{net::SocketAddr, path::PathBuf};
 mod healthcheck;
 
 use reelarr_db::Database;
-use reelarr_server::{app_with_ui, leptos_options, state::AppState};
+use reelarr_server::{app_with_ui, check_site, leptos_options, state::AppState};
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -13,6 +13,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         None => {}
     }
     tracing_subscriber::fmt::init();
+
+    let leptos_options = match leptos_options().and_then(|o| check_site(&o).map(|()| o)) {
+        Ok(options) => options,
+        Err(e) => {
+            tracing::error!("{e}");
+            std::process::exit(1);
+        }
+    };
 
     let data_dir = std::env::var_os("REELARR_DATA_DIR")
         .map(PathBuf::from)
@@ -34,7 +42,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .await
         .expect("failed to bind port");
     tracing::info!("Reelarr listening on {addr}");
-    axum::serve(listener, app_with_ui(state, leptos_options())).await?;
+    axum::serve(listener, app_with_ui(state, leptos_options)).await?;
     Ok(())
 }
 

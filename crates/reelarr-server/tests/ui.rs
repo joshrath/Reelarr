@@ -147,3 +147,77 @@ async fn health_returns_ok() {
     let health: Health = serde_json::from_str(&body).unwrap();
     assert_eq!(health.status, "ok");
 }
+
+#[tokio::test]
+async fn ui_responses_carry_security_headers() {
+    let res = test_app()
+        .await
+        .oneshot(Request::get("/").body(Body::empty()).unwrap())
+        .await
+        .unwrap();
+    let h = res.headers();
+    assert_eq!(h["cache-control"], "no-store");
+    assert_eq!(h["x-content-type-options"], "nosniff");
+    assert_eq!(h["referrer-policy"], "same-origin");
+    assert_eq!(h["content-security-policy"], "frame-ancestors 'none'");
+    assert_eq!(h["x-frame-options"], "DENY");
+}
+
+#[tokio::test]
+async fn pkg_assets_revalidate() {
+    let res = test_app()
+        .await
+        .oneshot(
+            Request::get("/pkg/reelarr.css")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(res.headers()["cache-control"], "no-cache");
+    assert_eq!(res.headers()["x-content-type-options"], "nosniff");
+}
+
+#[tokio::test]
+async fn font_assets_revalidate() {
+    let res = test_app()
+        .await
+        .oneshot(
+            Request::get("/fonts/plus-jakarta-sans-var.woff2")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(res.headers()["cache-control"], "no-cache");
+}
+
+#[tokio::test]
+async fn api_responses_keep_their_own_headers() {
+    let res = test_app()
+        .await
+        .oneshot(
+            Request::get("/api/v1/auth/session")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert!(res.status().is_success());
+    let h = res.headers();
+    assert!(h.get("content-security-policy").is_none());
+    assert!(h.get("x-frame-options").is_none());
+    let cookies: Vec<_> = h
+        .get_all("set-cookie")
+        .iter()
+        .map(|v| v.to_str().unwrap().to_string())
+        .collect();
+    assert!(
+        cookies.iter().any(|c| c.starts_with("reelarr_session=")),
+        "{cookies:?}"
+    );
+    assert!(
+        cookies.iter().any(|c| c.starts_with("reelarr_csrf=")),
+        "{cookies:?}"
+    );
+}
