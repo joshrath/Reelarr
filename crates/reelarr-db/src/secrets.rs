@@ -62,6 +62,17 @@ impl XChaChaSecretCipher {
         Self(XChaCha20Poly1305::new((&*key).into()))
     }
 
+    /// A random key that exists only in this process. Secrets written with it
+    /// cannot be read after a restart; for tests and throwaway state only.
+    /// Production startup uses [`Self::from_env_or_data_dir`].
+    pub fn ephemeral() -> Result<Self, SecretError> {
+        let mut key = Zeroizing::new([0u8; 32]);
+        OsRng
+            .try_fill_bytes(&mut *key)
+            .map_err(|_| SecretError::Randomness)?;
+        Ok(Self::new(*key))
+    }
+
     pub fn from_base64_key(encoded: &str) -> Result<Self, SecretError> {
         let decoded = Zeroizing::new(
             STANDARD

@@ -1,8 +1,8 @@
-use std::{net::SocketAddr, path::PathBuf};
+use std::{net::SocketAddr, path::PathBuf, sync::Arc};
 
 mod healthcheck;
 
-use reelarr_db::Database;
+use reelarr_db::{Database, secrets::XChaChaSecretCipher};
 use reelarr_server::{app_with_ui, check_site, leptos_options, state::AppState};
 
 #[tokio::main]
@@ -28,7 +28,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     tokio::fs::create_dir_all(&data_dir).await?;
     // Connecting applies migrations; errors return before any socket is bound.
     let db = Database::connect(data_dir.join("reelarr.db")).await?;
-    let state = AppState::new(db);
+    // Secret-at-rest key: REELARR_SECRET_KEY, else the 0600 secret.key in the
+    // data directory (created on first start). Blocking file I/O; fail before binding.
+    let key_dir = data_dir.clone();
+    let cipher =
+        tokio::task::spawn_blocking(move || XChaChaSecretCipher::from_env_or_data_dir(&key_dir))
+            .await?
+            .map_err(|e| format!("cannot load the secret-at-rest key: {e}"))?;
+    let state = AppState::with_cipher(db, Arc::new(cipher));
     // Reconcile durable snapshots before listening or starting any workers.
     state.jobs.recover_on_startup().await?;
     tracing::debug!(connections = state.db.pool().size(), "Database initialized");
