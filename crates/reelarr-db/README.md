@@ -92,3 +92,20 @@ for environment/key-file configuration and backup/recovery implications.
 `IndexerStore` reads are internal and include `SecretString` for building clients.
 Use `list_summaries` / `get_summary` for API-facing reads, never the full config.
 They do not decrypt keys, and report `has_api_key` only. No HTTP routes are added.
+
+## NZB store (#76)
+
+`SqliteNzbStore` implements `reelarr_nzb::NzbStore` (migration 0008). The parsed
+NZB is stored once as versioned JSON with its `movie_id`; completed segments are
+one row each in `nzb_checkpoints`. A `checkpoint` batch is validated in full, then
+applied in order in one `BEGIN IMMEDIATE` transaction, so it lands entirely or not
+at all. `remove` is idempotent and takes the checkpoints with it.
+
+The worker stores the NZB before inserting its job, so `nzb_documents` has no
+foreign key to `jobs`. Deleting a job removes its NZB through a trigger, and
+`SqliteNzbStore::open` (run at startup, before workers start) deletes NZBs whose
+job row never landed. A later migration that rebuilds `jobs` must recreate the
+`nzb_documents_job_deleted` trigger. Stored NZBs can include an archive password
+in plain JSON. That is the decided policy: archive passwords stay unencrypted
+inside the stored NZB document; encryption covers indexer API keys and NNTP
+passwords only.

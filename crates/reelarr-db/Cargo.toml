@@ -9,6 +9,8 @@ repository.workspace = true
 [dependencies]
 reelarr-core = { version = "0.0.1", path = "../reelarr-core" }
 reelarr-indexer = { version = "0.0.1", path = "../reelarr-indexer" }
+reelarr-nzb = { version = "0.0.1", path = "../reelarr-nzb" }
+reelarr-types = { version = "0.0.1", path = "../reelarr-types" }
 serde = { workspace = true }
 serde_json = { workspace = true }
 chacha20poly1305 = "0.10.1"
@@ -24,6 +26,5 @@ tokio = { workspace = true }
 rustix = { version = "1", features = ["fs", "process"] }
 
 [dev-dependencies]
-reelarr-types = { version = "0.0.1", path = "../reelarr-types" }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true, features = ["fmt"] }

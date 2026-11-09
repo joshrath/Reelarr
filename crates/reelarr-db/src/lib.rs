@@ -19,6 +19,9 @@ pub mod secrets;
 mod jobs;
 pub use jobs::SqliteJobStore;
 
+mod nzbs;
+pub use nzbs::SqliteNzbStore;
+
 mod settings;
 pub use settings::SqliteSettingsStore;
 

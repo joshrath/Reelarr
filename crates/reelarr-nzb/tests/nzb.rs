@@ -316,3 +316,15 @@ async fn store_keeps_movie_id_and_remove_is_idempotent() {
     // The ID is free again after removal.
     store.insert(id, read(VALID).unwrap(), None).await.unwrap();
 }
+
+#[path = "support/store_contract.rs"]
+mod store_contract;
+
+#[tokio::test]
+async fn in_memory_store_meets_shared_contract() {
+    store_contract::run(
+        || async { InMemoryNzbStore::default() },
+        reelarr_types::MovieId(7),
+    )
+    .await;
+}
