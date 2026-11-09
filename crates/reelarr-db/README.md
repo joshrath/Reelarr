@@ -78,8 +78,7 @@ per-segment completion or introduce a second database.
 `reelarr_indexer::IndexerStore`, validates before every upsert, and uses single
 SQL statements for atomic CRUD. Non-secret settings are versioned JSON (including
 nanosecond-precision durations); `extra_download_hosts` is its own ordered JSON
-array. Migration 0007 creates the indexer table; 0005 and 0006 belong to the
-#79 import work.
+array. Migration 0007 creates the indexer table.
 
 The default `secrets::XChaChaSecretCipher` encrypts API keys, with a versioned
 ciphertext, per-write nonce and record/field-bound associated data. No API keys
