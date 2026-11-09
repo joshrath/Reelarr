@@ -71,3 +71,18 @@ bound rather than silently discarding jobs.
 All NZB document/segment storage remains behind reelarr-nzb's NzbStore. Its SQL
 adapter/migrations belong here when implemented; this adapter does not persist
 per-segment completion or introduce a second database.
+
+## NZB store (#76)
+
+`SqliteNzbStore` implements `reelarr_nzb::NzbStore` (migration 0008). The parsed
+NZB is stored once as versioned JSON with its `movie_id`; completed segments are
+one row each in `nzb_checkpoints`. A `checkpoint` batch is validated in full, then
+applied in order in one `BEGIN IMMEDIATE` transaction, so it lands entirely or not
+at all. `remove` is idempotent and takes the checkpoints with it.
+
+The worker stores the NZB before inserting its job, so `nzb_documents` has no
+foreign key to `jobs`. Deleting a job removes its NZB through a trigger, and
+`SqliteNzbStore::open` (run at startup, before workers start) deletes NZBs whose
+job row never landed. A later migration that rebuilds `jobs` must recreate the
+`nzb_documents_job_deleted` trigger. Stored NZBs can include an archive password
+in plain JSON.

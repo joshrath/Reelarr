@@ -8,11 +8,14 @@ repository.workspace = true
 
 [dependencies]
 reelarr-core = { version = "0.0.1", path = "../reelarr-core" }
+reelarr-nzb = { version = "0.0.1", path = "../reelarr-nzb" }
+reelarr-types = { version = "0.0.1", path = "../reelarr-types" }
+serde = { workspace = true }
+serde_json = { workspace = true }
 async-trait = { workspace = true }
 thiserror = { workspace = true }
 sqlx = { workspace = true }
 tokio = { workspace = true }
 
 [dev-dependencies]
-reelarr-types = { version = "0.0.1", path = "../reelarr-types" }
 tempfile = { workspace = true }

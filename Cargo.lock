@@ -2596,7 +2596,10 @@ version = "0.0.1"
 dependencies = [
  "async-trait",
  "reelarr-core",
+ "reelarr-nzb",
  "reelarr-types",
+ "serde",
+ "serde_json",
  "sqlx",
  "tempfile",
  "thiserror 2.0.21",
