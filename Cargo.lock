@@ -2784,9 +2784,11 @@ dependencies = [
  "leptos_router",
  "reelarr-types",
  "serde",
+ "serde_json",
  "tokio",
  "tower",
  "wasm-bindgen",
+ "wasm-bindgen-futures",
  "web-sys",
 ]
 
