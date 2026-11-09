@@ -11,6 +11,11 @@ use super::{backend, to_i64, to_u64};
 use crate::scan::{MediaFileStore, NewMediaFile};
 use crate::store::StoreError;
 
+/// Column list spliced into `format!`ed queries wrapped in `AssertSqlSafe`.
+///
+/// This must stay a compile-time constant. Never make it dynamic: no runtime,
+/// config-derived, or caller-controlled text may be spliced into SQL passed to
+/// `AssertSqlSafe`. Bind every value with `?` instead.
 const COLUMNS: &str =
     "id, movie_id, root_id, path, size_bytes, modified_at, missing_since, probe, kind";
 
