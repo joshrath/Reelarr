@@ -378,7 +378,7 @@ async fn disc_image_download_is_imported_as_one_unprobed_file() {
 }
 
 #[tokio::test]
-async fn unrecognized_images_and_disc_folders_fail_permanently() {
+async fn unrecognized_images_fail_permanently() {
     let env = env().await;
     write(&env.downloads, &format!("{JOB}/movie.iso"), 5000);
     let outcome = importer(&env, |_| {})
@@ -388,7 +388,11 @@ async fn unrecognized_images_and_disc_folders_fail_permanently() {
         matches!(outcome, ImportOutcome::Failed { retryable: false, ref reason } if reason.contains("not a recognized disc image")),
         "{outcome:?}"
     );
+}
 
+#[tokio::test]
+async fn disc_folder_download_is_imported_as_one_unprobed_tree() {
+    let env = env().await;
     let job = "Other.Movie.2004.COMPLETE.BLURAY";
     write(&env.downloads, &format!("{job}/BDMV/index.bdmv"), 5);
     write(
@@ -396,12 +400,31 @@ async fn unrecognized_images_and_disc_folders_fail_permanently() {
         &format!("{job}/BDMV/STREAM/00001.m2ts"),
         5000,
     );
-    let outcome = importer(&env, |_| {})
-        .import(&request(&env, job, Some(env.movie)))
-        .await;
-    assert!(
-        matches!(outcome, ImportOutcome::Failed { retryable: false, ref reason } if reason.contains("can't be imported yet")),
-        "{outcome:?}"
+    let imp = importer(&env, |_| {});
+    let outcome = imp.import(&request(&env, job, Some(env.movie))).await;
+    let ImportOutcome::Imported {
+        media_file_id,
+        path,
+        ..
+    } = outcome
+    else {
+        panic!("expected import, got {outcome:?}");
+    };
+    let dest = env
+        .library
+        .join("The Example Movie (2004)")
+        .join("The Example Movie (2004)");
+    assert_eq!(path, dest);
+    assert!(dest.join("BDMV/index.bdmv").exists());
+    assert_eq!(
+        dest.join("BDMV/STREAM/00001.m2ts")
+            .metadata()
+            .unwrap()
+            .len(),
+        5000
     );
-    assert!(!env.library.join("The Example Movie (2004)").exists());
+    let stored = imp.files().get(media_file_id).await.unwrap().unwrap();
+    assert_eq!(stored.kind, MediaKind::DiscFolder);
+    assert!(stored.probe.is_none());
+    assert_eq!(stored.size_bytes, 5 + 5000);
 }

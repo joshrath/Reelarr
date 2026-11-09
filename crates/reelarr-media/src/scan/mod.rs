@@ -19,6 +19,7 @@ pub use store::{InMemoryMediaFileStore, MediaFileStore, NewMediaFile};
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
+use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use futures_util::stream::{self, StreamExt};
@@ -531,6 +532,7 @@ fn modified_secs(meta: &std::fs::Metadata) -> i64 {
 /// `VIDEO_TS/*.VOB`) are never treated as separate videos.
 fn walk(root: &Path, (disc_max_entries, disc_timeout): (usize, Duration)) -> Walked {
     let mut walked = Walked::default();
+    let mut pending: Vec<(PathBuf, Candidate)> = Vec::new();
     let mut it = walkdir::WalkDir::new(root)
         .follow_links(false)
         .into_iter()
@@ -574,7 +576,7 @@ fn walk(root: &Path, (disc_max_entries, disc_timeout): (usize, Duration)) -> Wal
                     };
                     // Loose videos or images beside the disc structure
                     // (an extra .mkv rip, say) are their own entries.
-                    loose_files(&path, &mut walked);
+                    loose_files(&path, &mut pending, &mut walked);
                     match disc::folder_size(&path, limits) {
                         Ok((size_bytes, modified_at)) => walked.found.push(FoundFile {
                             path,
@@ -606,22 +608,15 @@ fn walk(root: &Path, (disc_max_entries, disc_timeout): (usize, Duration)) -> Wal
         } else {
             continue;
         };
-        match entry.metadata() {
-            Ok(meta) => walked.found.push(FoundFile {
-                size_bytes: meta.len(),
-                modified_at: modified_secs(&meta),
-                path: entry.into_path(),
-                candidate,
-            }),
-            Err(e) => walked.errors.push(e.to_string()),
-        }
+        pending.push((entry.into_path(), candidate));
     }
+    fill_metadata(&mut walked, pending);
     walked
 }
 
 /// Records the video files and images directly inside a disc folder.
 /// Subfolders are not searched; the disc structure is one unit.
-fn loose_files(dir: &Path, walked: &mut Walked) {
+fn loose_files(dir: &Path, pending: &mut Vec<(PathBuf, Candidate)>, walked: &mut Walked) {
     let entries = match std::fs::read_dir(dir) {
         Ok(entries) => entries,
         Err(e) => {
@@ -648,13 +643,6 @@ fn loose_files(dir: &Path, walked: &mut Walked) {
                 continue;
             }
         }
-        let meta = match entry.metadata() {
-            Ok(meta) => meta,
-            Err(e) => {
-                walked.errors.push(format!("{}: {e}", path.display()));
-                continue;
-            }
-        };
         let candidate = if is_video_file(&path) {
             Candidate::Video
         } else if disc::is_iso_path(&path) && is_scannable_name(&path) {
@@ -662,11 +650,39 @@ fn loose_files(dir: &Path, walked: &mut Walked) {
         } else {
             continue;
         };
-        walked.found.push(FoundFile {
-            size_bytes: meta.len(),
-            modified_at: modified_secs(&meta),
-            path,
-            candidate,
+        pending.push((path, candidate));
+    }
+}
+
+/// Parallel `stat` of regular video and image files, in chunks of 16, after
+/// the sequential walk. Disc `folder_size` stays sequential.
+const STAT_BATCH: usize = 16;
+
+fn fill_metadata(walked: &mut Walked, pending: Vec<(PathBuf, Candidate)>) {
+    for chunk in pending.chunks(STAT_BATCH) {
+        thread::scope(|scope| {
+            let handles: Vec<_> = chunk
+                .iter()
+                .map(|(path, candidate)| {
+                    scope.spawn(move || match std::fs::symlink_metadata(path) {
+                        Ok(meta) if meta.file_type().is_file() => Ok(FoundFile {
+                            size_bytes: meta.len(),
+                            modified_at: modified_secs(&meta),
+                            path: path.clone(),
+                            candidate: *candidate,
+                        }),
+                        Ok(_) => Err(format!("{} is not a regular file", path.display())),
+                        Err(e) => Err(e.to_string()),
+                    })
+                })
+                .collect();
+            for handle in handles {
+                match handle.join() {
+                    Ok(Ok(file)) => walked.found.push(file),
+                    Ok(Err(e)) => walked.errors.push(e),
+                    Err(_) => walked.errors.push("stat thread panicked".into()),
+                }
+            }
         });
     }
 }

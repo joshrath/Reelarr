@@ -200,10 +200,7 @@ impl<M: MovieStore, F: MediaFileStore, P: Prober, R: ReleaseMatcher> Importer<M,
                 }
             }
             (None, None) if !selection.disc_folders.is_empty() => {
-                return Err(Failure::permanent(format!(
-                    "{} is a DVD/Blu-ray folder rip, which can't be imported yet",
-                    selection.disc_folders[0].display()
-                )));
+                (selection.disc_folders[0].clone(), MediaKind::DiscFolder)
             }
             (None, None) => {
                 return Err(Failure::permanent(
@@ -232,15 +229,20 @@ impl<M: MovieStore, F: MediaFileStore, P: Prober, R: ReleaseMatcher> Importer<M,
                 "rename template produced an empty name".into(),
             ));
         };
-        let ext = source
-            .extension()
-            .and_then(|e| e.to_str())
-            .unwrap_or("mkv")
-            .to_ascii_lowercase();
+        let file_name = if kind == MediaKind::DiscFolder {
+            stem
+        } else {
+            let ext = source
+                .extension()
+                .and_then(|e| e.to_str())
+                .unwrap_or("mkv")
+                .to_ascii_lowercase();
+            format!("{stem}.{ext}")
+        };
         let rel_dest = parts
             .iter()
             .fold(PathBuf::new(), |p, c| p.join(c))
-            .join(format!("{stem}.{ext}"));
+            .join(file_name);
         if !rel_dest
             .components()
             .all(|c| matches!(c, std::path::Component::Normal(_)))
@@ -269,9 +271,15 @@ impl<M: MovieStore, F: MediaFileStore, P: Prober, R: ReleaseMatcher> Importer<M,
         let mode = self.options.mode;
         let dest_dir = dest.parent().map(Path::to_owned).unwrap_or_default();
         let (src, dst) = (prepared.source.clone(), dest.to_owned());
+        let tree = prepared.kind == MediaKind::DiscFolder;
         let transferred = tokio::task::spawn_blocking(move || {
             std::fs::create_dir_all(&dest_dir).map_err(transfer::TransferError::Dest)?;
-            transfer::transfer(&src, &dst, mode)
+            transfer::write_probe(&dest_dir)?;
+            if tree {
+                transfer::transfer_tree(&src, &dst, mode)
+            } else {
+                transfer::transfer(&src, &dst, mode)
+            }
         })
         .await
         .map_err(|e| Failure::retryable(format!("import task failed: {e}")))?
@@ -323,21 +331,33 @@ impl<M: MovieStore, F: MediaFileStore, P: Prober, R: ReleaseMatcher> Importer<M,
         kind: MediaKind,
         probe: Option<MediaProbe>,
     ) -> Result<MediaFileId, Failure> {
-        let meta = tokio::fs::metadata(dest)
-            .await
-            .map_err(|e| Failure::retryable(format!("cannot read imported file: {e}")))?;
-        let modified_at = meta
-            .modified()
-            .ok()
-            .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
-            .map(|d| d.as_secs() as i64)
-            .unwrap_or(0);
+        let dest_buf = dest.to_owned();
+        let folder = kind == MediaKind::DiscFolder;
+        let (size_bytes, modified_at) = blocking(move || {
+            if folder {
+                let limits = scan::disc::FolderLimits {
+                    max_entries: 20_000,
+                    deadline: std::time::Instant::now() + std::time::Duration::from_secs(60),
+                };
+                scan::disc::folder_size(&dest_buf, limits).map_err(std::io::Error::other)
+            } else {
+                let meta = std::fs::metadata(&dest_buf)?;
+                let modified_at = meta
+                    .modified()
+                    .ok()
+                    .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
+                    .map(|d| d.as_secs() as i64)
+                    .unwrap_or(0);
+                Ok((meta.len(), modified_at))
+            }
+        })
+        .await?;
         let dest_str = dest.to_string_lossy().into_owned();
         let media_file_id = match self.files.get_by_path(&dest_str).await? {
             Some(mut existing) => {
                 existing.movie_id = Some(movie_id);
                 existing.root_id = root_id;
-                existing.size_bytes = meta.len();
+                existing.size_bytes = size_bytes;
                 existing.modified_at = modified_at;
                 existing.status = MediaFileStatus::Present;
                 existing.probe = probe;
@@ -351,7 +371,7 @@ impl<M: MovieStore, F: MediaFileStore, P: Prober, R: ReleaseMatcher> Importer<M,
                         movie_id: Some(movie_id),
                         root_id,
                         path: dest_str,
-                        size_bytes: meta.len(),
+                        size_bytes,
                         modified_at,
                         probe,
                         kind,
