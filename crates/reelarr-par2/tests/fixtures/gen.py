@@ -1,10 +1,8 @@
 #!/usr/bin/env python3
 """Generate reelarr-par2 test fixtures directly from the PAR2 2.0 specification.
 
-Written for Reelarr from the public spec only (packet layout, MD5/CRC32 rules);
-no par2 tool or third-party PAR2 code is used. Recovery slice packets carry
-placeholder data (a fixed byte pattern), not Reed-Solomon output: verification
-only counts them. Real recovery data is needed for repair (#38).
+Written for Reelarr from the public spec only (packet layout, MD5/CRC32,
+GF(2^16) recovery); no par2 tool or third-party PAR2 code is used.
 
 Usage: python3 gen.py   (writes into this directory; deterministic)
 """
@@ -32,6 +30,61 @@ def packet(set_id, kind, body):
     length = 64 + len(body)
     tail = set_id + kind + body
     return MAGIC + struct.pack("<Q", length) + md5(tail) + tail
+
+
+POLY = 0x1100B
+ORDER = 65535
+
+
+class Field:
+    """GF(2^16) with generator 0x1100B, matching the PAR2 2.0 specification."""
+
+    def __init__(self):
+        self.exp = [0] * ORDER
+        self.log = [0] * 65536
+        x = 1
+        for i in range(ORDER):
+            self.exp[i] = x
+            self.log[x] = i
+            x <<= 1
+            if x & 0x10000:
+                x ^= POLY
+
+    def mul(self, a, b):
+        if a == 0 or b == 0:
+            return 0
+        return self.exp[(self.log[a] + self.log[b]) % ORDER]
+
+    def pow(self, a, e):
+        if a == 0:
+            return 1 if e == 0 else 0
+        return self.exp[(self.log[a] * (e % ORDER)) % ORDER]
+
+
+def slice_constants(field):
+    out = []
+    for n in range(ORDER):
+        if n % 3 and n % 5 and n % 17 and n % 257:
+            out.append(field.pow(2, n))
+    return out
+
+
+FIELD = Field()
+CONSTANTS = slice_constants(FIELD)
+
+
+def encode_recovery(slices, exponent):
+    slice_size = len(slices[0])
+    out = bytearray(slice_size)
+    factors = [FIELD.pow(CONSTANTS[i], exponent) for i in range(len(slices))]
+    for off in range(0, slice_size, 2):
+        acc = 0
+        for i, s in enumerate(slices):
+            word = s[off] | (s[off + 1] << 8)
+            acc ^= FIELD.mul(word, factors[i])
+        out[off] = acc & 0xFF
+        out[off + 1] = (acc >> 8) & 0xFF
+    return bytes(out)
 
 
 def data(seed, n):
@@ -68,8 +121,12 @@ def par2_set(prefix, files, slice_size, blocks):
     meta.append(packet(set_id, CREATOR, pad4(b"reelarr-par2 fixture generator")))
     index = b"".join(meta)
     out = {f"{prefix}.par2": index}
+    slices = []
+    for _fid, _nb, content, _h16 in entries:
+        for off in range(0, len(content), slice_size):
+            slices.append(content[off:off + slice_size].ljust(slice_size, b"\0"))
     recv = b"".join(
-        packet(set_id, RECV, struct.pack("<I", e) + bytes([e & 0xFF]) * slice_size)
+        packet(set_id, RECV, struct.pack("<I", e) + encode_recovery(slices, e))
         for e in range(blocks)
     )
     out[f"{prefix}.vol00+{blocks:02d}.par2"] = index + recv

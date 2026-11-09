@@ -8,8 +8,8 @@ No par2 binary, library or third-party PAR2 code was run or consulted.
 - Data files are deterministic xorshift32 output.
 - `*.par2` holds main, file description, IFSC and creator packets.
 - `*.vol00+NN.par2` repeats those packets and adds NN recovery slice packets
-  whose data is a placeholder byte pattern, not Reed-Solomon output. The
-  verifier only counts recovery blocks; repair (#38) needs real fixtures.
+  whose data is Reed-Solomon recovery computed from the specification's
+  GF(2^16) formula (same generator, constants and little-endian words).
 
 Damaged, truncated, renamed, duplicated and corrupt-packet cases are made at
 test time by copying these files and changing bytes in Rust.
