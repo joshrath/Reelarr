@@ -17,7 +17,7 @@ pub use indexers::{IndexerSummary, SqliteIndexerStore};
 pub mod secrets;
 
 mod jobs;
-pub use jobs::SqliteJobStore;
+pub use jobs::{ReorderError, SqliteJobStore};
 
 mod nzbs;
 pub use nzbs::SqliteNzbStore;

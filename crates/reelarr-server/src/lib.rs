@@ -2,6 +2,8 @@
 pub mod api;
 pub mod auth;
 pub mod downloads;
+pub mod indexers;
+pub mod jobs;
 pub mod library;
 pub mod nntp;
 pub mod state;

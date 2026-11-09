@@ -38,8 +38,19 @@
 //! running job's token, joins all job tasks and closes every pool. Stopped
 //! downloads stay `Downloading` and are requeued by the next startup.
 //!
-//! Not here yet: the job HTTP API (PR 5), and the media import hookup and
-//! cleanup after import (PR 6). A completed download stops at
+//! **Admission.** [`Supervisor::enqueue_nzb`] parses and stores an NZB and
+//! creates its `Queued` job (the NZB worker's own admission order: NZB
+//! first, then the job), places it behind any reordered queue, and then
+//! calls [`Supervisor::wake`]. Upload and indexer enqueue in the job API both
+//! go through it; there is no second dispatch path.
+//!
+//! **Discard.** [`Supervisor::discard`] removes a cancelled job's staging
+//! directory and unfinished publication. If the job's run is still stopping
+//! it is deferred until the run has returned, so files are never removed
+//! under a running worker.
+//!
+//! The job HTTP API is in [`crate::jobs`]. Not here yet: the media import
+//! hookup and cleanup after import (PR 6). A completed download stops at
 //! `ReadyForImport` unless an [`ImportHandler`] was set (tests only so far).
 
 mod runner;
@@ -50,7 +61,8 @@ pub use runner::{
 };
 
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
+    io,
     sync::{
         Arc, Mutex, MutexGuard, OnceLock,
         atomic::{AtomicBool, Ordering},
@@ -60,10 +72,16 @@ use std::{
 
 use reelarr_core::{
     CleanupRegistry, Failure, FailureCode, ImportHandler, Job, JobId, JobKind, JobState, JobStore,
-    JobStoreError, PathMapping, run_import,
+    JobStoreError, PathMapping, Priority, run_import,
 };
 use reelarr_db::{SqliteJobStore, SqliteNntpStore, SqliteNzbStore};
-use reelarr_nzb::worker::{CancelToken, Outcome, WorkerError};
+use reelarr_nzb::{
+    Segment, nntp,
+    worker::{
+        ArticleSource, CancelToken, EnqueueError, NzbWorker, Outcome, WorkerConfig, WorkerError,
+    },
+};
+use reelarr_types::MovieId;
 use tokio::{
     sync::Notify,
     task::{JoinHandle, JoinSet},
@@ -105,6 +123,58 @@ pub enum StartError {
     Reconcile(#[from] reelarr_nzb::StoreError),
 }
 
+/// What to queue with [`Supervisor::enqueue_nzb`].
+#[derive(Clone, Debug, Default)]
+pub struct NewDownload {
+    /// Used when the NZB has no title of its own.
+    pub fallback_title: String,
+    /// Wins over the NZB's own category.
+    pub category: Option<String>,
+    pub movie_id: Option<MovieId>,
+    pub priority: Priority,
+}
+
+/// Why [`Supervisor::enqueue_nzb`] created no job.
+#[derive(Debug, thiserror::Error)]
+pub enum AdmitError {
+    #[error(transparent)]
+    Enqueue(#[from] EnqueueError),
+    /// The job exists but its queue placement could not be saved.
+    #[error(transparent)]
+    Jobs(#[from] JobStoreError),
+    #[error("NZB admission task failed")]
+    Join,
+}
+
+/// How [`Supervisor::discard`] handled the request.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Discarded {
+    /// Staging files are gone (or were never there).
+    Now,
+    /// The job's run is still stopping; files go when it returns.
+    WhenStopped,
+}
+
+/// Why [`Supervisor::discard`] removed nothing.
+#[derive(Debug, thiserror::Error)]
+pub enum DiscardError {
+    #[error("only cancelled jobs are discarded (job is {0:?})")]
+    NotCancelled(JobState),
+    #[error(transparent)]
+    Jobs(#[from] JobStoreError),
+    #[error("removing staging files failed: {0}")]
+    Io(#[from] io::Error),
+}
+
+/// The admission/discard worker never downloads, so it has no article source.
+#[derive(Clone, Copy, Debug)]
+struct NoArticles;
+impl ArticleSource for NoArticles {
+    async fn fetch(&self, _: &Segment) -> Result<Vec<u8>, nntp::Error> {
+        Err(nntp::Error::Closed)
+    }
+}
+
 /// A running job as seen by the registry.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct ActiveJob {
@@ -124,6 +194,8 @@ struct Inner {
     nzbs: SqliteNzbStore,
     nntp: SqliteNntpStore,
     factory: Arc<dyn RunnerFactory>,
+    /// Admission and discard only; never runs a job.
+    files: Arc<NzbWorker<SqliteNzbStore, NoArticles>>,
     import: OnceLock<Arc<dyn ImportHandler>>,
     config: SupervisorConfig,
     wake: Notify,
@@ -147,6 +219,8 @@ struct State {
     draining: Vec<Arc<Generation>>,
     active: HashMap<JobId, Active>,
     held: HashMap<JobId, Hold>,
+    /// Cancelled jobs whose staging files go once their run returns.
+    discard: HashSet<JobId>,
     stopping: bool,
 }
 
@@ -178,20 +252,26 @@ fn dispatchable(job: &Job) -> bool {
 }
 
 impl Supervisor {
+    /// `worker` must be the same folders and parse limits the factory's
+    /// workers use; admission and discard work on them.
     pub fn new(
         jobs: Arc<SqliteJobStore>,
         nzbs: SqliteNzbStore,
         nntp: SqliteNntpStore,
         factory: Arc<dyn RunnerFactory>,
+        worker: WorkerConfig,
         mut config: SupervisorConfig,
     ) -> Self {
         config.max_concurrent_jobs = config.max_concurrent_jobs.max(1);
+        let store: Arc<dyn JobStore> = jobs.clone();
+        let files = Arc::new(NzbWorker::new(store, nzbs.clone(), NoArticles, worker));
         Self {
             inner: Arc::new(Inner {
                 jobs,
                 nzbs,
                 nntp,
                 factory,
+                files,
                 import: OnceLock::new(),
                 config,
                 wake: Notify::new(),
@@ -260,8 +340,7 @@ impl Supervisor {
         Ok(job)
     }
 
-    /// Cancel a job and stop its run. Files are left for the job API's
-    /// discard step (PR 5).
+    /// Cancel a job and stop its run. Files stay until [`Self::discard`].
     pub async fn cancel(&self, id: JobId) -> Result<Job, JobStoreError> {
         let job = self
             .inner
@@ -271,6 +350,60 @@ impl Supervisor {
         self.inner.fire(id);
         self.wake();
         Ok(job)
+    }
+
+    /// Admit an NZB as a new `Queued` job, then wake the scheduler. Parsing
+    /// runs off the async workers. The job is placed behind any reordered
+    /// queue; a non-normal `priority` is applied before the wake.
+    pub async fn enqueue_nzb(&self, nzb: Vec<u8>, new: NewDownload) -> Result<Job, AdmitError> {
+        let files = self.inner.files.clone();
+        let runtime = tokio::runtime::Handle::current();
+        let NewDownload {
+            fallback_title,
+            category,
+            movie_id,
+            priority,
+        } = new;
+        let job = tokio::task::spawn_blocking(move || {
+            runtime.block_on(files.enqueue(nzb.as_slice(), &fallback_title, category, movie_id))
+        })
+        .await
+        .map_err(|_| AdmitError::Join)??;
+        // Wake even if placement fails: the job exists and must not sit unseen.
+        let placed = self.place(job, priority).await;
+        self.wake();
+        placed.map_err(AdmitError::from)
+    }
+
+    async fn place(&self, job: Job, priority: Priority) -> Result<Job, JobStoreError> {
+        let mut job = self.inner.jobs.append_to_queue(job.id).await?;
+        if priority != job.priority {
+            job = self
+                .inner
+                .jobs
+                .set_queue_order(job.id, priority, job.queue_position)
+                .await?;
+        }
+        Ok(job)
+    }
+
+    /// Remove a cancelled job's staging directory and unfinished publication.
+    /// While its run is still stopping this is deferred until the run returns.
+    /// Idempotent.
+    pub async fn discard(&self, id: JobId) -> Result<Discarded, DiscardError> {
+        let job = self.inner.jobs.get(id).await?;
+        if job.state != JobState::Cancelled {
+            return Err(DiscardError::NotCancelled(job.state));
+        }
+        {
+            let mut state = lock(&self.inner.state);
+            if state.active.contains_key(&id) {
+                state.discard.insert(id);
+                return Ok(Discarded::WhenStopped);
+            }
+        }
+        self.inner.files.discard(id).await?;
+        Ok(Discarded::Now)
     }
 
     /// Jobs running right now.
@@ -482,7 +615,7 @@ impl Inner {
                     if let Err(error) = other {
                         tracing::warn!(job = %id, %error, "could not re-read job before dispatch");
                     }
-                    lock(&self.state).active.remove(&id);
+                    self.release(id).await;
                     continue;
                 }
             }
@@ -516,6 +649,27 @@ impl Inner {
                 (id, ran)
             });
             task_jobs.insert(handle.id(), id);
+        }
+    }
+
+    /// Drop a job from the registry and run a discard deferred while it ran.
+    async fn release(&self, id: JobId) {
+        let deferred = {
+            let mut state = lock(&self.state);
+            state.active.remove(&id);
+            state.discard.remove(&id)
+        };
+        if deferred {
+            self.discard_now(id).await;
+        }
+    }
+
+    async fn discard_now(&self, id: JobId) {
+        match self.files.discard(id).await {
+            Ok(()) => tracing::debug!(job = %id, "discarded staging files of cancelled job"),
+            Err(error) => {
+                tracing::warn!(job = %id, %error, "could not discard staging files of cancelled job")
+            }
         }
     }
 
@@ -575,8 +729,19 @@ impl Inner {
                     .is_err()
             }
         };
+        let (retire, deferred) = self.settle(id, hold);
+        if deferred {
+            self.discard_now(id).await;
+        }
+        retire
+    }
+
+    /// Registry bookkeeping for a finished task: (generation to retire,
+    /// whether a deferred discard is due).
+    fn settle(&self, id: JobId, hold: bool) -> (Option<Arc<Generation>>, bool) {
         let mut state = lock(&self.state);
         let generation = state.active.remove(&id).map(|a| a.generation);
+        let deferred = state.discard.remove(&id);
         if hold {
             let failures = state.held.get(&id).map_or(0, |h| h.failures) + 1;
             let factor = 2u32.saturating_pow(failures.saturating_sub(1).min(16));
@@ -595,12 +760,18 @@ impl Inner {
         } else {
             state.held.remove(&id);
         }
-        let generation = generation?;
+        let Some(generation) = generation else {
+            return (None, deferred);
+        };
         if state.active.values().any(|a| a.generation == generation) {
-            return None;
+            return (None, deferred);
         }
-        let index = state.draining.iter().position(|g| g.id == generation)?;
-        Some(state.draining.swap_remove(index))
+        let retire = state
+            .draining
+            .iter()
+            .position(|g| g.id == generation)
+            .map(|index| state.draining.swap_remove(index));
+        (retire, deferred)
     }
 }
 

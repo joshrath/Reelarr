@@ -1,4 +1,4 @@
-use crate::{auth, library, nntp, state::AppState, stream};
+use crate::{auth, jobs, library, nntp, state::AppState, stream};
 use axum::{Router, middleware};
 
 /// Authentication endpoints stay public; domain routes require a valid session.
@@ -12,7 +12,8 @@ pub fn router(state: AppState) -> Router<AppState> {
     let protected = Router::new()
         .merge(stream::router())
         .merge(library::router())
-        .merge(nntp::router());
+        .merge(nntp::router())
+        .merge(jobs::router());
     #[cfg(test)]
     let protected = protected.merge(tests::domain_router());
     let protected =

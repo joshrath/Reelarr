@@ -258,6 +258,7 @@ async fn env(max_jobs: usize) -> Env {
         nzbs.clone(),
         nntp.clone(),
         Arc::new(factory),
+        WorkerConfig::new(&staging, &output),
         SupervisorConfig {
             max_concurrent_jobs: max_jobs,
             poll_interval: Duration::from_millis(50),
@@ -292,6 +293,7 @@ impl Env {
             self.nzbs.clone(),
             self.nntp.clone(),
             Arc::new(factory),
+            WorkerConfig::new(&self.staging, &self.output),
             SupervisorConfig {
                 max_concurrent_jobs: self.max_jobs,
                 poll_interval: Duration::from_millis(50),

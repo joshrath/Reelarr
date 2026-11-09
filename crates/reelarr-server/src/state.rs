@@ -1,6 +1,6 @@
 use reelarr_core::auth::{AuthService, InMemoryAuthService};
 use reelarr_db::{
-    Database, SqliteJobStore, SqliteNntpStore, SqliteNzbStore,
+    Database, SqliteIndexerStore, SqliteJobStore, SqliteNntpStore, SqliteNzbStore,
     secrets::{SecretCipher, XChaChaSecretCipher},
 };
 use reelarr_media::db::{DbMediaLookup, SqliteLibraryRootStore};
@@ -9,7 +9,10 @@ use reelarr_nzb::{nntp::RootCertStore, worker::WorkerConfig};
 use reelarr_stream::MediaLookup;
 use std::{path::PathBuf, sync::Arc};
 
-use crate::downloads::{NzbRunnerFactory, PoolConnector, Supervisor, SupervisorConfig};
+use crate::{
+    downloads::{NzbRunnerFactory, PoolConnector, Supervisor, SupervisorConfig},
+    indexers::IndexerClients,
+};
 
 /// Container default for [`DownloadOptions::root`].
 pub const DEFAULT_DOWNLOADS_ROOT: &str = "/downloads/reelarr";
@@ -67,6 +70,8 @@ pub struct AppState {
     /// Download scheduler and its NZB worker. The binary starts it before
     /// binding; [`Supervisor::start`] runs restart recovery first.
     pub downloads: Supervisor,
+    /// Shared per-indexer clients for NZB fetches.
+    pub indexers: IndexerClients,
 }
 
 impl AppState {
@@ -93,6 +98,7 @@ impl AppState {
     ) -> Self {
         let jobs = Arc::new(SqliteJobStore::new(&db));
         let nzbs = SqliteNzbStore::new(&db);
+        let indexers = IndexerClients::new(SqliteIndexerStore::new(&db, cipher.clone()));
         let nntp = SqliteNntpStore::new(&db, cipher);
         let factory = NzbRunnerFactory::new(
             jobs.clone(),
@@ -108,6 +114,7 @@ impl AppState {
             nzbs,
             nntp.clone(),
             Arc::new(factory),
+            downloads.worker_config(),
             downloads.scheduler.clone(),
         );
         Self {
@@ -119,6 +126,7 @@ impl AppState {
             nntp,
             nntp_trust: downloads.trust,
             downloads: supervisor,
+            indexers,
             db,
         }
     }
