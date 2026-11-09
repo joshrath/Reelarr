@@ -24,6 +24,20 @@ impl SqliteMediaFileStore {
     pub fn new(db: &Database) -> Self {
         Self { db: db.clone() }
     }
+
+    /// Files linked to a movie, oldest first.
+    pub async fn list_by_movie(&self, movie_id: MovieId) -> Result<Vec<MediaFile>, StoreError> {
+        sqlx::query(&format!(
+            "SELECT {COLUMNS} FROM media_files WHERE movie_id = ? ORDER BY id"
+        ))
+        .bind(movie_id.0)
+        .fetch_all(self.db.pool())
+        .await
+        .map_err(backend)?
+        .iter()
+        .map(row_to_file)
+        .collect()
+    }
 }
 
 pub(crate) fn probe_from_json(json: Option<String>) -> Result<Option<MediaProbe>, StoreError> {

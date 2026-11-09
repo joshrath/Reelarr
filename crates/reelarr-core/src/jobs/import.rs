@@ -30,8 +30,15 @@ pub struct CompletedDownload {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ImportResult {
-    Imported { media_file_id: MediaFileId },
-    Failed { reason: String, retryable: bool },
+    Imported {
+        media_file_id: MediaFileId,
+    },
+    Failed {
+        reason: String,
+        retryable: bool,
+        /// Recorded on the job; `None` records [`FailureCode::Other`].
+        code: Option<FailureCode>,
+    },
     NoMatch,
 }
 
@@ -135,13 +142,17 @@ pub async fn run_import(
             // Include the cleanup-message watermark when available; Completed is stable.
             Ok(store.get(id).await.unwrap_or(completed))
         }
-        ImportResult::Failed { reason, retryable } => {
+        ImportResult::Failed {
+            reason,
+            retryable,
+            code,
+        } => {
             store
                 .transition(
                     id,
                     JobState::Failed,
                     Some(Failure {
-                        code: FailureCode::Other,
+                        code: code.unwrap_or(FailureCode::Other),
                         message: reason,
                         retryable,
                     }),
