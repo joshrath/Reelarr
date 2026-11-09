@@ -178,6 +178,12 @@ async fn generic_import_failure_and_no_match_have_distinct_outcomes(factory: &dy
         ImportResult::Failed {
             reason: "collision".into(),
             retryable: true,
+            code: None,
+        },
+        ImportResult::Failed {
+            reason: "library share is offline".into(),
+            retryable: true,
+            code: Some(FailureCode::RootOffline),
         },
         ImportResult::NoMatch,
     ] {
@@ -210,8 +216,12 @@ async fn generic_import_failure_and_no_match_have_distinct_outcomes(factory: &dy
         assert_eq!(job.state, JobState::Failed);
         let failure = job.failure.unwrap();
         match result {
-            ImportResult::Failed { reason, retryable } => {
-                assert_eq!(failure.code, FailureCode::Other);
+            ImportResult::Failed {
+                reason,
+                retryable,
+                code,
+            } => {
+                assert_eq!(failure.code, code.unwrap_or(FailureCode::Other));
                 assert_eq!(failure.message, reason);
                 assert_eq!(failure.retryable, retryable);
                 assert!(

@@ -70,4 +70,9 @@ highlight = "all"
 unknown-registry = "deny"
 unknown-git = "deny"
 allow-registry = ["https://github.com/rust-lang/crates.io-index"]
-allow-git = []
+# sqlx is pinned to launchbadge/sqlx@10462fa (main, 2026-11-08), the first
+# commit that accepts libsqlite3-sys 0.39 (patched SQLite 3.54.x, fixing
+# RUSTSEC-2026-0459). No crates.io sqlx release allows it yet (0.9.0 caps
+# libsqlite3-sys <0.38). Remove this entry and return to a crates.io sqlx once
+# a release includes that bump.
+allow-git = ["https://github.com/launchbadge/sqlx"]

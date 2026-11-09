@@ -115,6 +115,15 @@ pub enum FailureCode {
     Duplicate,
     NoMatch,
     PathUnmapped,
+    /// The library root chosen for an import is offline or unreadable.
+    RootOffline,
+    /// The library refused the write (read-only share, permissions).
+    LibraryPermissionDenied,
+    /// Several library roots exist and none is set as the import default,
+    /// or there is no library root at all.
+    NoDefaultRoot,
+    /// A different file already exists at the import destination.
+    DestinationConflict,
     Other,
 }
 
