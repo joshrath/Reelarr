@@ -61,6 +61,7 @@ jobs:
           test -s target/site/pkg/reelarr.wasm
           test -s target/site/pkg/reelarr.js
           test -s target/site/pkg/reelarr.css
+          test -s target/site/fonts/space-mono-400.woff2
 
   docker:
     runs-on: ubuntu-latest
