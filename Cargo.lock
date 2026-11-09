@@ -2638,12 +2638,16 @@ dependencies = [
 name = "reelarr-nzb"
 version = "0.0.1"
 dependencies = [
+ "async-trait",
  "crc32fast",
  "quick-xml",
  "rcgen",
  "reelarr-core",
+ "reelarr-rar",
+ "reelarr-types",
  "rustls",
  "rustls-native-certs",
+ "tempfile",
  "thiserror 2.0.21",
  "tokio",
  "tokio-rustls",
