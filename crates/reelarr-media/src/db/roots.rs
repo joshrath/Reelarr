@@ -4,8 +4,10 @@ use reelarr_db::Database;
 use reelarr_types::{
     LibraryRoot, LibraryRootId, LibraryRootInfo, LibraryRootKind, NewLibraryRoot, RootHealth,
 };
-use sqlx::Row;
+// `COLUMNS` is a compile-time constant, so these `format!`ed queries carry no
+// caller-supplied SQL; values are always bound with `?`.
 use sqlx::sqlite::SqliteRow;
+use sqlx::{AssertSqlSafe, Row};
 
 use super::{backend, to_i64, to_u64};
 use crate::store::StoreError;
@@ -155,9 +157,9 @@ impl SqliteLibraryRootStore {
 
     /// All roots, ordered by id.
     pub async fn list(&self) -> Result<Vec<LibraryRoot>, StoreError> {
-        sqlx::query(&format!(
+        sqlx::query(AssertSqlSafe(format!(
             "SELECT {COLUMNS} FROM library_roots r ORDER BY r.id"
-        ))
+        )))
         .fetch_all(self.db.pool())
         .await
         .map_err(backend)?
@@ -167,9 +169,9 @@ impl SqliteLibraryRootStore {
     }
 
     pub async fn get(&self, id: LibraryRootId) -> Result<Option<LibraryRoot>, StoreError> {
-        sqlx::query(&format!(
+        sqlx::query(AssertSqlSafe(format!(
             "SELECT {COLUMNS} FROM library_roots r WHERE r.id = ?"
-        ))
+        )))
         .bind(id.0)
         .fetch_optional(self.db.pool())
         .await
@@ -182,10 +184,10 @@ impl SqliteLibraryRootStore {
     /// Roots with their health and the number of files the library knows in
     /// each, for the settings page.
     pub async fn list_info(&self) -> Result<Vec<LibraryRootInfo>, StoreError> {
-        let rows = sqlx::query(&format!(
+        let rows = sqlx::query(AssertSqlSafe(format!(
             "SELECT {COLUMNS}, (SELECT COUNT(*) FROM media_files f WHERE f.root_id = r.id) \
              AS file_count FROM library_roots r ORDER BY r.id"
-        ))
+        )))
         .fetch_all(self.db.pool())
         .await
         .map_err(backend)?;
@@ -202,9 +204,9 @@ impl SqliteLibraryRootStore {
     }
 
     pub async fn health(&self, id: LibraryRootId) -> Result<Option<RootHealth>, StoreError> {
-        sqlx::query(&format!(
+        sqlx::query(AssertSqlSafe(format!(
             "SELECT {COLUMNS} FROM library_roots r WHERE r.id = ?"
-        ))
+        )))
         .bind(id.0)
         .fetch_optional(self.db.pool())
         .await
