@@ -34,7 +34,7 @@ pub enum JobStoreError {
 /// Single authority for state changes and per-job seq allocation. Implementations
 /// atomically persist state/ordering/seq before publishing events. Progress stays in
 /// a hot cache and is broadcast at a bounded rate, not written for every update.
-/// reelarr-db owns the future SQL adapter/migrations; NZB payload/segment checkpoints
+/// reelarr-db owns the SQL adapter/migrations; NZB payload/segment checkpoints
 /// belong to NzbStore keyed by JobId and must be batched independently of events.
 #[async_trait]
 pub trait JobStore: Send + Sync {

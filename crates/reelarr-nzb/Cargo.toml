@@ -7,10 +7,16 @@ license.workspace = true
 repository.workspace = true
 
 [dependencies]
-reelarr-core = { path = "../reelarr-core" }
+reelarr-core = { version = "0.0.1", path = "../reelarr-core" }
 quick-xml = "0.42"
 crc32fast = "1.5"
 thiserror = "2"
+tokio.workspace = true
+tracing.workspace = true
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
+tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "tls12"] }
+rustls-native-certs = "0.8"
 
 [dev-dependencies]
-tokio.workspace = true
+rcgen = { version = "0.14", default-features = false, features = ["ring"] }
+tracing-subscriber = { workspace = true, features = ["fmt"] }

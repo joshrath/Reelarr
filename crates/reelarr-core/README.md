@@ -1,9 +1,9 @@
 # Core job contracts (#29)
 
-This crate owns the job lifecycle. It does not execute NZBs or import media. This
-PR implements the typed contracts and in-memory store; the **sqlx JobStore adapter
-and job-table migration are a follow-up after #39 merges**. All persistence
-implementations/migrations belong in `reelarr-db`.
+This crate owns the job lifecycle. It does not execute NZBs or import media.
+`reelarr-db::SqliteJobStore` is the durable adapter; the in-memory implementation
+and both adapters' shared behavioural tests follow the same contracts. All
+persistence implementations/migrations belong in `reelarr-db`.
 
 ## Executors and scheduling (#11)
 

@@ -38,12 +38,13 @@ where
 ///
 /// - SSR pages and errors: `Cache-Control: no-store`, since pages may carry
 ///   per-session data once sign-in is live.
-/// - `/pkg/*` assets: `Cache-Control: no-cache`, so browsers revalidate. Asset
+/// - `/pkg/*` and `/fonts/*` assets: `Cache-Control: no-cache`, so browsers revalidate. Asset
 ///   file names are not content-hashed yet; switch to `immutable` if they are.
 /// - Always: `nosniff`, `Referrer-Policy: same-origin`, and framing denied via
 ///   CSP `frame-ancestors 'none'` plus `X-Frame-Options: DENY`.
 async fn security_headers(req: Request<Body>, next: Next) -> Response {
-    let is_asset = req.uri().path().starts_with("/pkg/");
+    let path = req.uri().path();
+    let is_asset = path.starts_with("/pkg/") || path.starts_with("/fonts/");
     let mut res = next.run(req).await;
     let headers = res.headers_mut();
     let cache = if is_asset { "no-cache" } else { "no-store" };

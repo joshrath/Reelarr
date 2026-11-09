@@ -2,6 +2,7 @@
 pub mod api;
 pub mod auth;
 pub mod state;
+pub mod stream;
 
 use std::path::Path;
 

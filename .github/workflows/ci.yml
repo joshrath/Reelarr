@@ -25,6 +25,43 @@ jobs:
         run: cargo clippy -p reelarr-ui --lib --target wasm32-unknown-unknown --features hydrate -- -D warnings
       - run: cargo test --workspace
 
+  cargo-deny:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+      # v2.1.1, bundles cargo-deny 0.20.2; keep local and CI versions aligned.
+      - uses: EmbarkStudios/cargo-deny-action@3c6349835b2b7b196a839186cb8b78e02f7b5f25
+        with:
+          rust-version: stable
+          arguments: --locked --all-features
+          command: check
+          # Only the unmaintained lint is downgraded, as policy requests.
+          # Vulnerabilities/unsoundness remain errors; no ignored advisories.
+          command-arguments: --warn unmaintained
+
+  ui-build:
+    runs-on: ubuntu-latest
+    needs: check
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+      - uses: Swatinem/rust-cache@v2
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-leptos@${{ env.CARGO_LEPTOS_VERSION }}
+      - name: Build server and site
+        run: cargo leptos build --release
+      - name: Check site assets
+        run: |
+          test -s target/site/pkg/reelarr.wasm
+          test -s target/site/pkg/reelarr.js
+          test -s target/site/pkg/reelarr.css
+          test -s target/site/fonts/space-mono-400.woff2
+
   docker:
     runs-on: ubuntu-latest
     needs: check
@@ -44,10 +81,8 @@ jobs:
           docker run -d --name reelarr -p 7979:7979 reelarr:ci
           for i in $(seq 1 30); do curl -fsS http://localhost:7979/health && break; sleep 1; done
           curl -fsS http://localhost:7979/ | grep -q 'aria-label="Main"'
-          # The release image is the only cargo-leptos build in CI, so check
-          # the site assets it ships.
-          for f in reelarr.wasm reelarr.js reelarr.css; do
-            curl -fsS -o /dev/null "http://localhost:7979/pkg/$f"
+          for f in pkg/reelarr.wasm pkg/reelarr.js pkg/reelarr.css fonts/bebas-neue-400.woff2; do
+            curl -fsS -o /dev/null "http://localhost:7979/$f"
           done
           curl -fsSI http://localhost:7979/ | grep -qi '^x-content-type-options: nosniff'
           docker rm -f reelarr

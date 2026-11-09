@@ -22,6 +22,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Connecting applies migrations; errors return before any socket is bound.
     let db = Database::connect(data_dir.join("reelarr.db")).await?;
     let state = AppState::new(db);
+    // Reconcile durable snapshots before listening or starting any workers.
+    state.jobs.recover_on_startup().await?;
     tracing::debug!(connections = state.db.pool().size(), "Database initialized");
 
     let port: u16 = std::env::var("REELARR_PORT")
