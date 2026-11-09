@@ -43,6 +43,10 @@ pub struct IndexerConfig {
     pub enabled: bool,
     /// Explicit trust override for local/private HTTP services (not automatic).
     pub allow_http: bool,
+    /// Extra download hosts trusted to serve this indexer's NZBs (#44), e.g. a CDN.
+    /// Exact, already-normalized hostnames only (see [`normalize_download_host`]):
+    /// HTTPS on the default port, never `allow_http`, no wildcards, ports or IPs.
+    pub extra_download_hosts: Vec<String>,
     pub connect_timeout: Duration,
     pub request_timeout: Duration,
     pub minimum_interval: Duration,
@@ -72,6 +76,7 @@ impl IndexerConfig {
             categories: vec![2000],
             enabled: true,
             allow_http: false,
+            extra_download_hosts: Vec::new(),
             connect_timeout: Duration::from_secs(10),
             request_timeout: Duration::from_secs(30),
             minimum_interval: Duration::from_secs(1),
@@ -120,8 +125,75 @@ impl IndexerConfig {
         if endpoint.origin() != url.origin() {
             return Err(IndexerError::InvalidConfig);
         }
+        if self.extra_download_hosts.len() > MAX_EXTRA_DOWNLOAD_HOSTS {
+            return Err(IndexerError::InvalidConfig);
+        }
+        let mut seen = BTreeSet::new();
+        for host in &self.extra_download_hosts {
+            if normalize_download_host(host)? != *host || !seen.insert(host.as_str()) {
+                return Err(IndexerError::InvalidConfig);
+            }
+        }
         Ok(())
     }
+    /// Whether `download` may be fetched for this indexer, given its API `endpoint`.
+    ///
+    /// Same origin as the endpoint (scheme, host and port) is always allowed. Otherwise
+    /// only `https` on the default port to an exact entry of `extra_download_hosts`.
+    /// Userinfo and fragments are never allowed.
+    pub fn download_url_allowed(&self, endpoint: &Url, download: &Url) -> bool {
+        if !download.username().is_empty()
+            || download.password().is_some()
+            || download.fragment().is_some()
+            || !matches!(download.scheme(), "https" | "http")
+        {
+            return false;
+        }
+        if download.origin() == endpoint.origin() {
+            return true;
+        }
+        download.scheme() == "https"
+            && download.port().is_none()
+            && download
+                .domain()
+                .is_some_and(|host| self.extra_download_hosts.iter().any(|h| h == host))
+    }
+}
+
+/// Upper bound on `IndexerConfig::extra_download_hosts` entries.
+pub const MAX_EXTRA_DOWNLOAD_HOSTS: usize = 16;
+
+/// Normalize administrator input to the exact hostname form stored in
+/// `extra_download_hosts`: lowercase ASCII (IDNA/punycode), no trailing dot.
+/// Rejects schemes, ports, paths, userinfo, wildcards, IP literals and control chars.
+/// The error never contains the rejected value.
+pub fn normalize_download_host(input: &str) -> Result<String, IndexerError> {
+    const BAD: IndexerError = IndexerError::InvalidConfig;
+    let input = input.trim();
+    if input.is_empty()
+        || input.len() > 253
+        || input.chars().any(|c| c.is_control() || c.is_whitespace())
+        || input.contains(['/', '\\', ':', '@', '?', '#', '*', '[', ']', '%'])
+    {
+        return Err(BAD);
+    }
+    let parsed = Url::parse(&format!("https://{input}/")).map_err(|_| BAD)?;
+    // `domain()` is None for IPv4/IPv6 literals.
+    let Some(host) = parsed.domain() else {
+        return Err(BAD);
+    };
+    let host = host.trim_end_matches('.');
+    if host.is_empty()
+        || !host.contains('.')
+        || host
+            .split('.')
+            .any(|label| label.is_empty() || label.len() > 63)
+        || parsed.port().is_some()
+        || parsed.path() != "/"
+    {
+        return Err(BAD);
+    }
+    Ok(host.to_owned())
 }
 
 /// Advertised search mode and parameter names (not guessed extensions).
@@ -162,7 +234,7 @@ pub struct MovieQuery {
 pub struct Release {
     pub title: String,
     pub guid: String,
-    /// Same-origin HTTP(S) enclosure. Treat it as a credential, not a loggable URL.
+    /// Same-origin or allowlisted-HTTPS enclosure. Treat it as a credential, not a loggable URL.
     pub download_url: SecretString,
     pub size: Option<u64>,
     /// Original RFC 822/2822 RSS timestamp, with its supplied zone retained.
@@ -222,6 +294,10 @@ pub enum IndexerError {
     MalformedXml,
     ResponseTooLarge,
     UnsafeDownloadUrl,
+    /// A download redirected more than the allowed number of times.
+    TooManyRedirects,
+    /// A fetched download body is not an NZB document.
+    InvalidNzb,
     Store,
 }
 impl fmt::Display for IndexerError {

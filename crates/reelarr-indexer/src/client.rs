@@ -1,12 +1,18 @@
 //! Shared asynchronous transport, capability cache, rate gate and bounded pagination.
-use crate::{Capabilities, IndexerConfig, IndexerError, MovieQuery, SearchResults, xml};
+use crate::{Capabilities, IndexerConfig, IndexerError, MovieQuery, Release, SearchResults, xml};
 use reqwest::{Client, Url, redirect::Policy};
 use std::{
     collections::HashSet,
     sync::Arc,
     time::{Duration, SystemTime},
 };
-use tokio::{sync::Mutex, time::Instant};
+use tokio::{
+    sync::{Mutex, MutexGuard},
+    time::Instant,
+};
+
+/// Redirect hops followed by [`NewznabClient::fetch_nzb`] before failing closed.
+pub const MAX_DOWNLOAD_REDIRECTS: usize = 5;
 
 struct Gate {
     next: Instant,
@@ -174,7 +180,11 @@ impl NewznabClient {
         for _ in 0..config.max_pages {
             let mut page_params = params.clone();
             page_params.push(("offset".into(), offset.to_string()));
-            let page = xml::page(&self.request(&page_params).await?, &self.inner.endpoint)?;
+            let page = xml::page(
+                &self.request(&page_params).await?,
+                &self.inner.endpoint,
+                &self.inner.config,
+            )?;
             if page.offset.is_some_and(|reported| reported != offset) {
                 return Ok(SearchResults {
                     releases,
@@ -249,18 +259,7 @@ impl NewznabClient {
     async fn request_inner(&self, params: &[(String, String)]) -> Result<Vec<u8>, IndexerError> {
         // Serialize across the entire exchange, not just the send, and do not
         // automatically retry: callers can present typed errors without request storms.
-        let mut gate = self.inner.gate.lock().await;
-        if let Some((at, duration)) = gate.cooldown {
-            let remaining = duration.saturating_sub(at.elapsed());
-            if !remaining.is_zero() {
-                return Err(IndexerError::RateLimited {
-                    retry_after: remaining,
-                });
-            }
-            gate.cooldown = None;
-        }
-        tokio::time::sleep_until(gate.next).await;
-        gate.next = Instant::now() + self.inner.config.minimum_interval;
+        let mut gate = self.gate().await?;
         let mut request = self
             .inner
             .http
@@ -275,30 +274,8 @@ impl NewznabClient {
         }
         let mut response = request.send().await.map_err(IndexerError::transport)?;
         let status = response.status();
-        let retry_after = response
-            .headers()
-            .get(reqwest::header::RETRY_AFTER)
-            .and_then(|v| v.to_str().ok())
-            .and_then(retry_after);
-        if status.as_u16() == 429 || retry_after.is_some() && status.as_u16() == 503 {
-            let delay = retry_after.unwrap_or(Duration::from_secs(60));
-            gate.cooldown = Some((Instant::now(), delay));
-            return Err(IndexerError::RateLimited { retry_after: delay });
-        }
-        let max = self.inner.config.max_response_bytes;
-        if response
-            .content_length()
-            .is_some_and(|len| len > max as u64)
-        {
-            return Err(IndexerError::ResponseTooLarge);
-        }
-        let mut body = Vec::new();
-        while let Some(chunk) = response.chunk().await.map_err(IndexerError::transport)? {
-            if chunk.len() > max.saturating_sub(body.len()) {
-                return Err(IndexerError::ResponseTooLarge);
-            }
-            body.extend_from_slice(&chunk);
-        }
+        let retry_after = rate_limit(&mut gate, &response)?;
+        let body = self.read_body(&mut response).await?;
         // Newznab errors take precedence even when wrapped in a non-200 status.
         if let Ok(doc) = xml::document(&body)
             && let Err(error) = xml::api_error(&doc)
@@ -320,6 +297,131 @@ impl NewznabClient {
         }
         Ok(body)
     }
+    /// Fetch a release's NZB from its enclosure URL, honoring this indexer's
+    /// download-host policy on the initial URL and on every redirect hop.
+    ///
+    /// Redirects are followed manually, at most [`MAX_DOWNLOAD_REDIRECTS`] times;
+    /// each `Location` must itself pass [`IndexerConfig::download_url_allowed`].
+    /// The body is capped by `max_response_bytes`, the rate gate and request
+    /// timeout apply to the whole exchange, and only a light NZB sanity check is
+    /// made here; full parsing belongs to reelarr-nzb. Errors never carry URLs.
+    pub async fn fetch_nzb(&self, release: &Release) -> Result<Vec<u8>, IndexerError> {
+        if !self.inner.config.enabled {
+            return Err(IndexerError::Disabled);
+        }
+        tokio::time::timeout(
+            self.inner.config.request_timeout,
+            self.fetch_nzb_inner(release),
+        )
+        .await
+        .map_err(|_| IndexerError::Timeout)?
+    }
+    async fn fetch_nzb_inner(&self, release: &Release) -> Result<Vec<u8>, IndexerError> {
+        let config = &self.inner.config;
+        let mut url = Url::parse(release.download_url.expose())
+            .map_err(|_| IndexerError::UnsafeDownloadUrl)?;
+        let mut gate = self.gate().await?;
+        for _ in 0..=MAX_DOWNLOAD_REDIRECTS {
+            if !config.download_url_allowed(&self.inner.endpoint, &url) {
+                return Err(IndexerError::UnsafeDownloadUrl);
+            }
+            let mut response = self
+                .inner
+                .http
+                .get(url.clone())
+                .send()
+                .await
+                .map_err(IndexerError::transport)?;
+            let status = response.status();
+            if status.is_redirection() {
+                let location = response
+                    .headers()
+                    .get(reqwest::header::LOCATION)
+                    .and_then(|v| v.to_str().ok())
+                    .ok_or(IndexerError::Http {
+                        status: status.as_u16(),
+                    })?;
+                url = url
+                    .join(location)
+                    .map_err(|_| IndexerError::UnsafeDownloadUrl)?;
+                continue;
+            }
+            rate_limit(&mut gate, &response)?;
+            let body = self.read_body(&mut response).await?;
+            if let Ok(doc) = xml::document(&body) {
+                xml::api_error(&doc)?;
+            }
+            if !status.is_success() {
+                return Err(IndexerError::Http {
+                    status: status.as_u16(),
+                });
+            }
+            if !looks_like_nzb(&body) {
+                return Err(IndexerError::InvalidNzb);
+            }
+            return Ok(body);
+        }
+        Err(IndexerError::TooManyRedirects)
+    }
+    /// Serialize on the per-indexer gate, honoring cooldown and minimum interval.
+    async fn gate(&self) -> Result<MutexGuard<'_, Gate>, IndexerError> {
+        let mut gate = self.inner.gate.lock().await;
+        if let Some((at, duration)) = gate.cooldown {
+            let remaining = duration.saturating_sub(at.elapsed());
+            if !remaining.is_zero() {
+                return Err(IndexerError::RateLimited {
+                    retry_after: remaining,
+                });
+            }
+            gate.cooldown = None;
+        }
+        tokio::time::sleep_until(gate.next).await;
+        gate.next = Instant::now() + self.inner.config.minimum_interval;
+        Ok(gate)
+    }
+    async fn read_body(&self, response: &mut reqwest::Response) -> Result<Vec<u8>, IndexerError> {
+        let max = self.inner.config.max_response_bytes;
+        if response
+            .content_length()
+            .is_some_and(|len| len > max as u64)
+        {
+            return Err(IndexerError::ResponseTooLarge);
+        }
+        let mut body = Vec::new();
+        while let Some(chunk) = response.chunk().await.map_err(IndexerError::transport)? {
+            if chunk.len() > max.saturating_sub(body.len()) {
+                return Err(IndexerError::ResponseTooLarge);
+            }
+            body.extend_from_slice(&chunk);
+        }
+        Ok(body)
+    }
+}
+/// Start a cooldown and fail on 429 (or 503 with Retry-After); else return Retry-After.
+fn rate_limit(
+    gate: &mut Gate,
+    response: &reqwest::Response,
+) -> Result<Option<Duration>, IndexerError> {
+    let status = response.status().as_u16();
+    let retry_after = response
+        .headers()
+        .get(reqwest::header::RETRY_AFTER)
+        .and_then(|v| v.to_str().ok())
+        .and_then(retry_after);
+    if status == 429 || retry_after.is_some() && status == 503 {
+        let delay = retry_after.unwrap_or(Duration::from_secs(60));
+        gate.cooldown = Some((Instant::now(), delay));
+        return Err(IndexerError::RateLimited { retry_after: delay });
+    }
+    Ok(retry_after)
+}
+/// Cheap check that a body is an NZB document: an `<nzb` root element appears
+/// within the prolog window (XML declaration / DOCTYPE allowed before it).
+fn looks_like_nzb(body: &[u8]) -> bool {
+    let window = &body[..body.len().min(4096)];
+    window
+        .windows(5)
+        .any(|w| w[..4] == *b"<nzb" && matches!(w[4], b' ' | b'>' | b'\t' | b'\r' | b'\n' | b'/'))
 }
 fn retry_after(value: &str) -> Option<Duration> {
     value
