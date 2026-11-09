@@ -527,7 +527,8 @@ async fn crash_after_move_wrong_size_dest_is_a_conflict() {
     let job = JobId::new();
     crashed_plan(&env, job, &root, &source, TransferMode::Move).await;
     std::fs::remove_file(&source).unwrap();
-    std::fs::write(dest_in(&root), b"someone else's file").unwrap();
+    let dest = dest_in(&root);
+    std::fs::write(&dest, b"someone else's file").unwrap();
 
     let result = env
         .handler(|o| o.mode = TransferMode::Move)
@@ -536,6 +537,45 @@ async fn crash_after_move_wrong_size_dest_is_a_conflict() {
     assert_eq!(
         failed(result),
         (false, Some(FailureCode::DestinationConflict))
+    );
+    let entry = SqliteImportLedger::new(&env.db)
+        .get(&job.to_string())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(entry.state, LedgerState::Pending);
+    assert_eq!(entry.dest_path, dest.to_string_lossy());
+    assert!(entry.media_file_id.is_none());
+    assert_eq!(env.file_count().await, 0);
+}
+
+/// A dest whose canonicalize returns ELOOP is a terminal conflict on a
+/// fresh import. Move-finish recovery of an unreadable dest stays
+/// retryable RootOffline; see
+/// [`crash_after_move_unreadable_dest_on_a_healthy_root_is_retryable`].
+#[tokio::test]
+async fn dest_symlink_loop_on_a_fresh_import_is_a_conflict() {
+    let env = env().await;
+    let root = env.root("library").await;
+    let source = env.download(b"main feature bytes");
+    let dest = dest_in(&root);
+    std::fs::create_dir_all(dest.parent().unwrap()).unwrap();
+    std::os::unix::fs::symlink(&dest, &dest).unwrap();
+
+    let job = JobId::new();
+    let result = env.handler(|_| {}).import(env.completed(job)).await;
+    assert_eq!(
+        failed(result),
+        (false, Some(FailureCode::DestinationConflict))
+    );
+    assert!(source.exists());
+    assert!(
+        SqliteImportLedger::new(&env.db)
+            .get(&job.to_string())
+            .await
+            .unwrap()
+            .is_none(),
+        "a conflict before place must not leave a pending row"
     );
 }
 

@@ -415,6 +415,11 @@ async fn ensure_dest_inside(root: &LibraryRoot, dest: &Path) -> Result<(), Failu
             checked.display(),
             root.path
         ))),
+        Err(e) if e.raw_os_error() == Some(::libc::ELOOP) => Err(Failure::permanent(format!(
+            "import destination {} is a symbolic link loop",
+            checked.display()
+        ))
+        .with_code(FailureCode::DestinationConflict)),
         Err(e) => Err(Failure::retryable(format!(
             "cannot resolve destination {}: {e}",
             checked.display()
@@ -542,5 +547,14 @@ mod dest_inside_tests {
         let tmp = tempfile::tempdir().unwrap();
         let dest = tmp.path().join("Movie").join("Movie.mkv");
         assert!(dest_stays_inside(tmp.path(), &dest).unwrap());
+    }
+
+    #[test]
+    fn a_symlink_loop_is_eloop() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dest = tmp.path().join("loop.mkv");
+        std::os::unix::fs::symlink(&dest, &dest).unwrap();
+        let err = dest_stays_inside(tmp.path(), &dest).unwrap_err();
+        assert_eq!(err.raw_os_error(), Some(::libc::ELOOP), "{err}");
     }
 }

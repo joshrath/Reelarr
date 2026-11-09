@@ -131,7 +131,19 @@ pub fn safe_copy(src: &Path, dest: &Path) -> Result<(), TransferError> {
                 .write(true)
                 .create_new(true)
                 .open(&partial)
-                .map_err(TransferError::Dest)?;
+                .map_err(|e| {
+                    TransferError::Dest(if e.kind() == io::ErrorKind::AlreadyExists {
+                        io::Error::new(
+                            io::ErrorKind::AlreadyExists,
+                            format!(
+                                "leftover partial file already exists: {}",
+                                partial.display()
+                            ),
+                        )
+                    } else {
+                        e
+                    })
+                })?;
             copy_bytes(src, &mut out)?;
             out.sync_all().map_err(TransferError::Dest)?;
         }
@@ -176,10 +188,12 @@ fn copy_bytes(src: &Path, out: &mut fs::File) -> Result<(), TransferError> {
     let mut input = fs::File::open(src).map_err(TransferError::Source)?;
     let mut buf = vec![0u8; 64 * 1024];
     loop {
-        let n = input.read(&mut buf).map_err(TransferError::Source)?;
-        if n == 0 {
-            return Ok(());
-        }
+        let n = match input.read(&mut buf) {
+            Ok(0) => return Ok(()),
+            Ok(n) => n,
+            Err(e) if e.kind() == io::ErrorKind::Interrupted => continue,
+            Err(e) => return Err(TransferError::Source(e)),
+        };
         out.write_all(&buf[..n]).map_err(TransferError::Dest)?;
     }
 }
@@ -290,7 +304,7 @@ pub fn transfer_tree(
                 ))));
             }
         }
-        let (walk_root, _) = tree_walk_root(src)?;
+        let walk_root = tree_walk_root(src)?;
         remove_tree_sources(&files, &walk_root)?;
 
         return Ok(Transferred::Moved);
@@ -336,7 +350,7 @@ pub fn dest_tree_complete(dest: &Path, expected_bytes: u64) -> io::Result<bool> 
 }
 
 fn list_tree_files(src: &Path, dest: &Path) -> Result<Vec<(PathBuf, PathBuf)>, TransferError> {
-    let (walk_root, copy_all) = tree_walk_root(src)?;
+    let walk_root = tree_walk_root(src)?;
     let mut files = Vec::new();
     for entry in walkdir::WalkDir::new(&walk_root).follow_links(false) {
         let entry = entry.map_err(|e| TransferError::Source(io::Error::other(e)))?;
@@ -346,30 +360,25 @@ fn list_tree_files(src: &Path, dest: &Path) -> Result<Vec<(PathBuf, PathBuf)>, T
         if !crate::scan::is_scannable_name(entry.path()) {
             continue;
         }
+        if !disc::is_disc_payload_path(&walk_root, entry.path()) {
+            continue;
+        }
         let rel = match entry.path().strip_prefix(&walk_root) {
             Ok(rel) => rel,
             Err(_) => continue,
         };
-        if !copy_all {
-            let first = rel
-                .components()
-                .next()
-                .and_then(|c| c.as_os_str().to_str())
-                .unwrap_or("");
-            if !disc::is_disc_structure_dir(first) {
-                continue;
-            }
-        }
         files.push((entry.path().to_owned(), dest.join(rel)));
     }
     Ok(files)
 }
 
-/// Root to walk and whether every file under it should be copied (`true`)
-/// or only disc-structure subdirectories (`false`).
-fn tree_walk_root(src: &Path) -> Result<(PathBuf, bool), TransferError> {
+/// Root to walk for the disc payload. A recognized folder (`Movie/BDMV`)
+/// walks from the folder itself; a bare `VIDEO_TS` walks from its parent
+/// so `AUDIO_TS` comes along. Extra files outside disc-structure
+/// directories are left in the download by [`list_tree_files`].
+fn tree_walk_root(src: &Path) -> Result<PathBuf, TransferError> {
     match disc::disc_folder_format(src) {
-        Ok(Some(_)) => return Ok((src.to_owned(), true)),
+        Ok(Some(_)) => return Ok(src.to_owned()),
         Ok(None) => {}
         Err(e) => return Err(TransferError::Source(e)),
     }
@@ -380,7 +389,7 @@ fn tree_walk_root(src: &Path) -> Result<(PathBuf, bool), TransferError> {
     if disc::is_disc_structure_dir(&name)
         && let Some(parent) = src.parent()
     {
-        return Ok((parent.to_owned(), false));
+        return Ok(parent.to_owned());
     }
     Err(TransferError::Source(io::Error::other(format!(
         "not a disc folder: {}",
@@ -579,6 +588,26 @@ mod tests {
                 .join(format!("BDMV/STREAM/00001.m2ts{PARTIAL_SUFFIX}"))
                 .exists()
         );
+        assert!(dest_tree_complete(&dest, 15).unwrap());
+    }
+
+    #[test]
+    fn tree_skips_sibling_videos_and_nested_extras() {
+        let dir = tempfile::tempdir().unwrap();
+        let src = bluray_tree(dir.path());
+        fs::write(src.join("extra.mkv"), b"sidecar").unwrap();
+        fs::create_dir_all(src.join("Extras")).unwrap();
+        fs::write(src.join("Extras/featurette.mkv"), b"feat").unwrap();
+        assert_eq!(tree_payload_size(&src).unwrap(), 15);
+        let dest = dir.path().join("library/Movie (2010)");
+        assert_eq!(
+            transfer_tree(&src, &dest, TransferMode::Copy).unwrap(),
+            Transferred::Copied
+        );
+        assert!(!dest.join("extra.mkv").exists());
+        assert!(!dest.join("Extras/featurette.mkv").exists());
+        assert!(src.join("extra.mkv").exists());
+        assert!(src.join("Extras/featurette.mkv").exists());
         assert!(dest_tree_complete(&dest, 15).unwrap());
     }
 

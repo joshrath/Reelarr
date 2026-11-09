@@ -530,7 +530,9 @@ fn modified_secs(meta: &std::fs::Metadata) -> i64 {
 
 /// Walks a root. Disc folders are recorded as one entry each and not
 /// descended into; files inside disc-structure folders (`BDMV/STREAM/*.m2ts`,
-/// `VIDEO_TS/*.VOB`) are never treated as separate videos.
+/// `VIDEO_TS/*.VOB`) are never treated as separate videos. Loose videos
+/// sitting beside the disc (including nested extras folders) are reported
+/// separately.
 fn walk(root: &Path, (disc_max_entries, disc_timeout): (usize, Duration)) -> Walked {
     let mut walked = Walked::default();
     let mut pending: Vec<(PathBuf, Candidate)> = Vec::new();
@@ -576,7 +578,7 @@ fn walk(root: &Path, (disc_max_entries, disc_timeout): (usize, Duration)) -> Wal
                         deadline: Instant::now() + disc_timeout,
                     };
                     // Loose videos or images beside the disc structure
-                    // (an extra .mkv rip, say) are their own entries.
+                    // (an extra .mkv rip or Extras/*.mkv) are their own entries.
                     loose_files(&path, &mut pending, &mut walked);
                     match disc::folder_size(&path, limits) {
                         Ok((size_bytes, modified_at)) => walked.found.push(FoundFile {
@@ -615,8 +617,9 @@ fn walk(root: &Path, (disc_max_entries, disc_timeout): (usize, Duration)) -> Wal
     walked
 }
 
-/// Records the video files and images directly inside a disc folder.
-/// Subfolders are not searched; the disc structure is one unit.
+/// Records video files and images beside a disc folder, including those in
+/// nested extras directories. Disc-structure directories themselves are
+/// skipped — the disc is already one [`FoundFile`].
 fn loose_files(dir: &Path, pending: &mut Vec<(PathBuf, Candidate)>, walked: &mut Walked) {
     let entries = match std::fs::read_dir(dir) {
         Ok(entries) => entries,
@@ -638,6 +641,15 @@ fn loose_files(dir: &Path, pending: &mut Vec<(PathBuf, Candidate)>, walked: &mut
         // Movie.mkv link pointing outside the root is not listed or probed.
         match entry.file_type() {
             Ok(ft) if ft.is_file() => {}
+            Ok(ft) if ft.is_dir() => {
+                let name = entry.file_name();
+                let name = name.to_string_lossy();
+                if disc::is_disc_structure_dir(&name) || name.starts_with('.') {
+                    continue;
+                }
+                loose_files(&path, pending, walked);
+                continue;
+            }
             Ok(_) => continue,
             Err(e) => {
                 walked.errors.push(format!("{}: {e}", path.display()));

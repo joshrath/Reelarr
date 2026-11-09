@@ -32,6 +32,19 @@ pub fn is_disc_structure_dir(name: &str) -> bool {
     DISC_STRUCTURE_DIRS.contains(&name.to_ascii_lowercase().as_str())
 }
 
+/// Whether `file` lives under a disc-structure directory of `root`
+/// (`BDMV`, `VIDEO_TS`, and the other names in [`DISC_STRUCTURE_DIRS`]).
+/// Sibling extras such as `root/feature.mkv` or `root/Extras/foo.mkv`
+/// are not part of the disc payload.
+pub fn is_disc_payload_path(root: &Path, file: &Path) -> bool {
+    file.strip_prefix(root)
+        .map(|rel| {
+            rel.components()
+                .any(|c| c.as_os_str().to_str().is_some_and(is_disc_structure_dir))
+        })
+        .unwrap_or(false)
+}
+
 /// Reads the volume descriptor area of an image and reports whether it has
 /// an ISO 9660 (`CD001`) or UDF (`BEA01`/`NSR02`/`NSR03`) signature.
 pub fn has_disc_signature(path: &Path) -> io::Result<bool> {
@@ -121,6 +134,9 @@ pub fn folder_size(dir: &Path, limits: FolderLimits) -> Result<(u64, i64), Strin
             continue;
         }
         if !super::is_scannable_name(entry.path()) {
+            continue;
+        }
+        if !is_disc_payload_path(dir, entry.path()) {
             continue;
         }
         let meta = entry.metadata().map_err(|e| e.to_string())?;
