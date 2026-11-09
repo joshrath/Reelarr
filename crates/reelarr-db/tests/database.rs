@@ -134,7 +134,7 @@ async fn in_memory_pool_shares_migrated_tables_across_concurrent_queries() {
             .fetch_one(&pool)
             .await
             .unwrap();
-            assert_eq!(migrations.get::<i64, _>("count"), 2);
+            assert_eq!(migrations.get::<i64, _>("count"), expected_migrations());
 
             let theme = sqlx::query("SELECT value FROM settings WHERE key = ?")
                 .bind("theme")
@@ -169,4 +169,14 @@ async fn in_memory_pool_shares_migrated_tables_across_concurrent_queries() {
         assert_eq!(row.get::<String, _>("value"), format!("ok-{i}"));
     }
     db.pool().close().await;
+}
+
+/// Number of migration files shipped in `migrations/`, so tests don't break
+/// every time a new migration lands.
+fn expected_migrations() -> i64 {
+    std::fs::read_dir(concat!(env!("CARGO_MANIFEST_DIR"), "/migrations"))
+        .expect("migrations dir")
+        .filter_map(Result::ok)
+        .filter(|e| e.path().extension().is_some_and(|x| x == "sql"))
+        .count() as i64
 }
