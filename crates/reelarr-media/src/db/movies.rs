@@ -8,6 +8,11 @@ use sqlx::{AssertSqlSafe, Row};
 use super::{backend, to_i64, to_u64};
 use crate::store::{MovieStore, StoreError};
 
+/// Column list spliced into `format!`ed queries wrapped in `AssertSqlSafe`.
+///
+/// This must stay a compile-time constant. Never make it dynamic: no runtime,
+/// config-derived, or caller-controlled text may be spliced into SQL passed to
+/// `AssertSqlSafe`. Bind every value with `?` instead.
 const COLUMNS: &str = "id, tmdb_id, imdb_id, title, original_title, year, overview, \
      runtime_minutes, poster_path, backdrop_path, metadata_fetched_at";
 
