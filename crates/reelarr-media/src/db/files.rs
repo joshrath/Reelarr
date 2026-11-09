@@ -2,8 +2,10 @@ use reelarr_db::Database;
 use reelarr_types::{
     LibraryRootId, MediaFile, MediaFileId, MediaFileStatus, MediaKind, MediaProbe, MovieId,
 };
-use sqlx::Row;
+// `COLUMNS` is a compile-time constant, so these `format!`ed queries carry no
+// caller-supplied SQL; values are always bound with `?`.
 use sqlx::sqlite::SqliteRow;
+use sqlx::{AssertSqlSafe, Row};
 
 use super::{backend, to_i64, to_u64};
 use crate::scan::{MediaFileStore, NewMediaFile};
@@ -23,6 +25,20 @@ pub struct SqliteMediaFileStore {
 impl SqliteMediaFileStore {
     pub fn new(db: &Database) -> Self {
         Self { db: db.clone() }
+    }
+
+    /// Files linked to a movie, oldest first.
+    pub async fn list_by_movie(&self, movie_id: MovieId) -> Result<Vec<MediaFile>, StoreError> {
+        sqlx::query(AssertSqlSafe(format!(
+            "SELECT {COLUMNS} FROM media_files WHERE movie_id = ? ORDER BY id"
+        )))
+        .bind(movie_id.0)
+        .fetch_all(self.db.pool())
+        .await
+        .map_err(backend)?
+        .iter()
+        .map(row_to_file)
+        .collect()
     }
 }
 
@@ -132,31 +148,35 @@ impl MediaFileStore for SqliteMediaFileStore {
     }
 
     async fn get(&self, id: MediaFileId) -> Result<Option<MediaFile>, StoreError> {
-        sqlx::query(&format!("SELECT {COLUMNS} FROM media_files WHERE id = ?"))
-            .bind(id.0)
-            .fetch_optional(self.db.pool())
-            .await
-            .map_err(backend)?
-            .as_ref()
-            .map(row_to_file)
-            .transpose()
+        sqlx::query(AssertSqlSafe(format!(
+            "SELECT {COLUMNS} FROM media_files WHERE id = ?"
+        )))
+        .bind(id.0)
+        .fetch_optional(self.db.pool())
+        .await
+        .map_err(backend)?
+        .as_ref()
+        .map(row_to_file)
+        .transpose()
     }
 
     async fn get_by_path(&self, path: &str) -> Result<Option<MediaFile>, StoreError> {
-        sqlx::query(&format!("SELECT {COLUMNS} FROM media_files WHERE path = ?"))
-            .bind(path)
-            .fetch_optional(self.db.pool())
-            .await
-            .map_err(backend)?
-            .as_ref()
-            .map(row_to_file)
-            .transpose()
+        sqlx::query(AssertSqlSafe(format!(
+            "SELECT {COLUMNS} FROM media_files WHERE path = ?"
+        )))
+        .bind(path)
+        .fetch_optional(self.db.pool())
+        .await
+        .map_err(backend)?
+        .as_ref()
+        .map(row_to_file)
+        .transpose()
     }
 
     async fn list_by_root(&self, root_id: LibraryRootId) -> Result<Vec<MediaFile>, StoreError> {
-        sqlx::query(&format!(
+        sqlx::query(AssertSqlSafe(format!(
             "SELECT {COLUMNS} FROM media_files WHERE root_id = ? ORDER BY id"
-        ))
+        )))
         .bind(root_id.0)
         .fetch_all(self.db.pool())
         .await
