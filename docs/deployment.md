@@ -154,3 +154,51 @@ absent directory from being silently created; it does **not** prove the NAS is
 mounted. Check `findmnt` on the host and use a NAS-resident sentinel/monitor
 before startup. Runtime root-health, adopt-in-place guarantees and
 unavailable-item behavior remain tracked in #59.
+
+## Indexer secret storage (store integration, #70)
+
+`reelarr-db` now supplies `SqliteIndexerStore` and a swappable `SecretCipher`.
+This PR does **not** wire indexer CRUD or secret initialization into the server;
+that belongs to the #76 integration. The default policy below is pending Josh's
+final decision, and the cipher is injected so it can be changed before merge.
+
+The default cipher encrypts each API key with RustCrypto XChaCha20-Poly1305 and
+an independently generated 24-byte OS-random nonce. Ciphertext is versioned and
+bound to the indexer name/field with AEAD associated data. The non-secret settings
+and ordered `extra_download_hosts` JSON array remain readable in the database.
+The host list must already be normalized lowercase/IDNA ASCII, unique and at most
+16 entries; storage rejects invalid input, never normalizes it silently. Exact
+allowlisted hosts permit only HTTPS/default-port downloads (including explicit
+443), without extending `allow_http` to them; #71 owns URL enforcement.
+
+At startup, integrations call `XChaChaSecretCipher::from_env()` (or
+`from_env_or_data_dir` with the configured data directory):
+
+- If set, `REELARR_SECRET_KEY` must be **standard base64 encoding exactly 32 bytes**.
+  Invalid encoding/length fails clearly, with no fallback to a key file. Use your
+  deployment's secret injection facilities; never put real keys in Git, command
+  history, logs or shared Compose files. Environment values can be visible to
+  container administrators; limit access to Docker and diagnostic tooling.
+- Otherwise load/generate `$REELARR_DATA_DIR/secret.key` (default
+  `/config/secret.key`). The file holds **32 raw bytes**, not base64. Creation
+  publishes a fully-written, synced temporary file atomically without overwriting
+  an existing key. Concurrent initializers use the same winning key. On Unix it
+  must be a regular, non-symlink file, owned by the Reelarr process user, mode
+  **0600**; unsafe permissions/ownership and invalid lengths fail, not auto-repair.
+  Non-Unix systems must use the environment key. The data directory must already
+  exist, be trusted/private, and be writable by Reelarr.
+
+This protects **database copies and backups that do not include the key file**;
+it does not protect against compromise of the running process or an attacker
+who can also read its key. Back up the key separately in secure storage. **Losing
+or changing the key means re-entering secrets**, not regenerating a usable key
+for existing ciphertext. There is no automatic key rotation/re-encryption in this
+PR. Preserve the key across redeploys; switching between env/file keys requires
+the same 32-byte key or an explicit future migration.
+
+`IndexerStore::list/get` return credentials only for trusted internal Newznab
+client construction (the non-serializable `IndexerConfig`). They are **not API
+DTOs**. API integrations must use `list_summaries/get_summary` or an explicit
+secret-free projection; the summaries contain only name, enabled, ordered extra
+hosts and `has_api_key`, never ciphertext or plaintext. The store's errors/debug
+and database statement logging do not expose secrets or SQL bind values.
