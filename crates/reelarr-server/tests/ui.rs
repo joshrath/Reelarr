@@ -284,3 +284,64 @@ async fn case_page_for_a_bad_id_still_renders_the_frame() {
     assert!(body.contains("Case —"));
     assert!(body.contains("Loading case"));
 }
+
+#[tokio::test]
+async fn counter_renders_the_search_desk() {
+    let (status, content_type, body) = get("/counter").await;
+    assert_eq!(status, 200);
+    assert!(content_type.starts_with("text/html"));
+    assert!(body.contains(r#"<h1 id="page-title">The Special Order Counter</h1>"#));
+    // A real search form and a labelled field, which works without JS too.
+    assert!(body.contains(r#"role="search""#));
+    assert!(body.contains(r#"action="/counter""#));
+    assert!(body.contains(r#"<label for="counter-q" class="visually-hidden">"#));
+    assert!(body.contains(r#"id="counter-q""#));
+    assert!(body.contains(r#"type="search""#));
+    assert!(body.contains(r#"name="q""#));
+    assert!(body.contains(r#"aria-label="Clear search""#));
+    assert!(body.contains(r#"aria-pressed="true""#));
+    // The session is checked in the browser; the server sends the desk
+    // with a loading status, and says plainly that search isn't hooked up.
+    assert!(body.contains("Search results &amp; shelf inventory"));
+    assert!(body.contains("Checking the counter"));
+    assert!(body.contains("Catalog search: not connected yet"));
+    assert!(body.contains("Desk clipboard // Active slips"));
+    assert!(body.contains("No order slips"));
+    // No sample titles, results or clerks from the design.
+    for made_up in [
+        "Blue Velvet",
+        "BLUE VELVET",
+        "Longlegs",
+        "LONGLEGS",
+        "Dune",
+        "DUNE",
+        "Furiosa",
+        "FURIOSA",
+        "Cure (1997)",
+        "CURE (1997)",
+        "Dave",
+        "DAVE",
+        "Prowlarr",
+        "PROWLARR",
+        "qBittorrent",
+        "SABnzbd",
+        "In stock",
+        "IN STOCK",
+        "/watch/",
+        "/case/",
+    ] {
+        assert!(!body.contains(made_up), "{made_up}");
+    }
+    // The counter is its own section, and the deck stays empty.
+    assert!(body.contains(r#"<a href="/counter" aria-current="page""#));
+    assert!(body.contains("No tape in the deck"));
+}
+
+#[tokio::test]
+async fn counter_keeps_the_query_without_inventing_results() {
+    let (status, _, body) = get("/counter?q=stop+making+sense").await;
+    assert_eq!(status, 200);
+    assert!(body.contains(r#"value="stop making sense""#));
+    assert!(!body.contains("1 result"));
+    assert!(!body.contains("IN STOCK"));
+}

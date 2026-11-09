@@ -10,6 +10,7 @@
 pub mod api;
 pub mod app;
 pub mod components;
+pub mod counter;
 pub mod library;
 pub mod pages;
 pub mod playback;
