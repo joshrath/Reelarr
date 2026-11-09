@@ -10,7 +10,7 @@ repository.workspace = true
 async-trait = { workspace = true }
 thiserror = { workspace = true }
 tokio = { workspace = true }
-reelarr-types = { path = "../reelarr-types" }
+reelarr-types = { version = "0.0.1", path = "../reelarr-types" }
 tracing = { workspace = true }
 uuid = { version = "1", features = ["v7"] }
 

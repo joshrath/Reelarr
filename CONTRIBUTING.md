@@ -8,6 +8,32 @@ Reelarr is written from scratch. Radarr, Sonarr, Prowlarr, Jellyfin, SABnzbd and
 
 Third-party crates are welcome as long as their licenses are compatible with GPL-3.0.
 
+## Dependency policy
+
+Install the same cargo-deny version used by the SHA-pinned CI action, then audit
+all four checks against the checked-in lockfile:
+
+```sh
+cargo install cargo-deny --locked --version 0.20.2
+cargo deny --locked check --warn unmaintained
+```
+
+`deny.toml` enumerates reviewed GPL-3.0-compatible SPDX identifiers. Unknown
+licenses, vulnerabilities/unsoundness, wildcard requirements and non-crates.io
+sources fail CI. Modern cargo-deny config selects unmaintained *scope*, not
+severity; the narrow `--warn unmaintained` flag implements our requested warning
+policy without hiding an advisory or weakening vulnerability checks. Yanked and
+duplicate versions also warn and must be reviewed.
+
+Do not silence findings or broaden allowances just to pass. License exceptions
+must name an exact crate/version, explain compatibility and redistribution
+obligations inline, and update [the review record](docs/dependency-policy.md).
+Advisory exceptions need an advisory id, concrete justification and removal plan;
+none are currently ignored. Keep explicit versions on internal path dependencies
+and update them together with the workspace version (omitting a version is an
+implicit wildcard). Preserve required third-party license/NOTICE/source/relinking
+materials when packaging releases; cargo-deny is not a substitute for that work.
+
 ## Workflow
 
 1. Pick or open an issue and say you're working on it.
@@ -31,3 +57,18 @@ The UI is written in Rust with [Leptos](https://leptos.dev). No React, and no Ja
 - Routing: `/health` and `/api/v1/*` belong to the server. Leptos server functions, if added, go under `/api/v1/fn/`. Everything else falls back to the UI, except unknown `/api/*` paths, which return a JSON 404.
 
 Run `cargo leptos watch` for a live-reloading dev server.
+
+## Protected API router convention
+
+Merge domain routers into `protected` in `reelarr-server::api::router` **before**
+applying `.route_layer(middleware::from_fn_with_state(state, require_auth))`.
+Never call `.layer()` on an empty router and merge domain routes afterwards:
+Axum layers wrap only routes already present. Keep setup/login/session endpoints
+in the public auth router, and merge that router separately. See the fix in
+[PR #50](https://github.com/joshrath/Reelarr/pull/50) and the
+[auth boundary (#7)](https://github.com/joshrath/Reelarr/issues/7).
+
+The API router's unit regression merges a test-only domain route at this exact
+composition point. It requires the middleware-inserted `AuthUser` extension (not
+an extractor fallback), asserting anonymous `401` with the `ApiError` JSON body
+and authenticated success. Keep this test when adding new domain routers.
