@@ -18,7 +18,7 @@ pub use store::{InMemoryMediaFileStore, MediaFileStore, NewMediaFile};
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use futures_util::stream::{self, StreamExt};
@@ -106,6 +106,50 @@ pub struct Scanner<P, S> {
     store: S,
     options: ScanOptions,
     running: Mutex<HashSet<LibraryRootId>>,
+    /// Blocking walks and image reads still running per root, including
+    /// ones a scan gave up on after a timeout (a hung share keeps them
+    /// stuck in the kernel). Caps how many pile up.
+    walks: Slots,
+    image_reads: Slots,
+}
+
+/// Counts blocking jobs per root. A [`Slot`] is held by the blocking
+/// closure itself, so it is only released when the job really ends.
+#[derive(Debug, Clone, Default)]
+struct Slots(Arc<Mutex<HashMap<LibraryRootId, usize>>>);
+
+impl Slots {
+    fn try_take(&self, root: LibraryRootId, cap: usize) -> Option<Slot> {
+        let mut map = self.0.lock().ok()?;
+        let n = map.entry(root).or_default();
+        if *n >= cap {
+            return None;
+        }
+        *n += 1;
+        Some(Slot {
+            slots: self.clone(),
+            root,
+        })
+    }
+}
+
+#[derive(Debug)]
+struct Slot {
+    slots: Slots,
+    root: LibraryRootId,
+}
+
+impl Drop for Slot {
+    fn drop(&mut self) {
+        if let Ok(mut map) = self.slots.0.lock()
+            && let Some(n) = map.get_mut(&self.root)
+        {
+            *n -= 1;
+            if *n == 0 {
+                map.remove(&self.root);
+            }
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -155,6 +199,8 @@ impl<P: Prober, S: MediaFileStore> Scanner<P, S> {
             store,
             options,
             running: Mutex::new(HashSet::new()),
+            walks: Slots::default(),
+            image_reads: Slots::default(),
         }
     }
 
@@ -192,7 +238,17 @@ impl<P: Prober, S: MediaFileStore> Scanner<P, S> {
 
         let walk_root = root_path.clone();
         let limits = (self.options.disc_max_entries, self.options.disc_timeout);
-        let walk_task = tokio::task::spawn_blocking(move || walk(&walk_root, limits));
+        let Some(slot) = self.walks.try_take(root.id, 1) else {
+            return Err(ScanError::RootUnavailable {
+                path: root.path.clone(),
+                reason: "an earlier listing of this folder is still stuck; the share may be hung"
+                    .into(),
+            });
+        };
+        let walk_task = tokio::task::spawn_blocking(move || {
+            let _slot = slot;
+            walk(&walk_root, limits)
+        });
         let started = Instant::now();
         let Walked {
             found,
@@ -249,7 +305,7 @@ impl<P: Prober, S: MediaFileStore> Scanner<P, S> {
                     if existing.size_bytes == file.size_bytes
                         && existing.modified_at == file.modified_at
                         && file.candidate.matches(existing.kind)
-                        && (existing.probe.is_some() || existing.kind.is_disc()) =>
+                        && (existing.probe.is_some() || !existing.kind.is_streamable()) =>
                 {
                     if existing.status != MediaFileStatus::Present {
                         let mut restored = existing;
@@ -267,9 +323,20 @@ impl<P: Prober, S: MediaFileStore> Scanner<P, S> {
         // Probe with bounded concurrency.
         let prober = &self.prober;
         let disc_timeout = self.options.disc_timeout;
+        let image_cap = self.options.probe_concurrency.max(1);
+        let image_reads = &self.image_reads;
         let probed: Vec<_> = stream::iter(to_probe)
             .map(|(file, existing)| async move {
-                let result = identify(prober, &file, disc_timeout).await;
+                let slot = match file.candidate {
+                    Candidate::Iso => image_reads.try_take(root.id, image_cap).map(Some),
+                    _ => Some(None),
+                };
+                let result = match slot {
+                    Some(slot) => identify(prober, &file, disc_timeout, slot).await,
+                    None => Err(ProbeError::Failed(
+                        "skipped: earlier image reads on this share are still stuck".into(),
+                    )),
+                };
                 (file, existing, result)
             })
             .buffer_unordered(self.options.probe_concurrency.max(1))
@@ -427,13 +494,17 @@ async fn identify<P: Prober>(
     prober: &P,
     file: &FoundFile,
     disc_timeout: Duration,
+    slot: Option<Slot>,
 ) -> Result<(MediaKind, Option<MediaProbe>), ProbeError> {
     match file.candidate {
         Candidate::Video => Ok((MediaKind::File, Some(prober.probe(&file.path).await?))),
         Candidate::DiscFolder => Ok((MediaKind::DiscFolder, None)),
         Candidate::Iso => {
             let path = file.path.clone();
-            let check = tokio::task::spawn_blocking(move || disc::has_disc_signature(&path));
+            let check = tokio::task::spawn_blocking(move || {
+                let _slot = slot;
+                disc::has_disc_signature(&path)
+            });
             match tokio::time::timeout(disc_timeout, check).await {
                 Ok(Ok(Ok(true))) => Ok((MediaKind::DiscImage, None)),
                 Ok(Ok(Ok(false))) => Ok((MediaKind::UnrecognizedImage, None)),
@@ -501,6 +572,9 @@ fn walk(root: &Path, (disc_max_entries, disc_timeout): (usize, Duration)) -> Wal
                         max_entries: disc_max_entries,
                         deadline: Instant::now() + disc_timeout,
                     };
+                    // Loose videos or images beside the disc structure
+                    // (an extra .mkv rip, say) are their own entries.
+                    loose_files(&path, &mut walked);
                     match disc::folder_size(&path, limits) {
                         Ok((size_bytes, modified_at)) => walked.found.push(FoundFile {
                             path,
@@ -545,6 +619,58 @@ fn walk(root: &Path, (disc_max_entries, disc_timeout): (usize, Duration)) -> Wal
     walked
 }
 
+/// Records the video files and images directly inside a disc folder.
+/// Subfolders are not searched; the disc structure is one unit.
+fn loose_files(dir: &Path, walked: &mut Walked) {
+    let entries = match std::fs::read_dir(dir) {
+        Ok(entries) => entries,
+        Err(e) => {
+            walked.errors.push(format!("{}: {e}", dir.display()));
+            return;
+        }
+    };
+    for entry in entries {
+        let entry = match entry {
+            Ok(entry) => entry,
+            Err(e) => {
+                walked.errors.push(format!("{}: {e}", dir.display()));
+                continue;
+            }
+        };
+        let path = entry.path();
+        // Match the main walk: file_type() does not follow symlinks, so a
+        // Movie.mkv link pointing outside the root is not listed or probed.
+        match entry.file_type() {
+            Ok(ft) if ft.is_file() => {}
+            Ok(_) => continue,
+            Err(e) => {
+                walked.errors.push(format!("{}: {e}", path.display()));
+                continue;
+            }
+        }
+        let meta = match entry.metadata() {
+            Ok(meta) => meta,
+            Err(e) => {
+                walked.errors.push(format!("{}: {e}", path.display()));
+                continue;
+            }
+        };
+        let candidate = if is_video_file(&path) {
+            Candidate::Video
+        } else if disc::is_iso_path(&path) && is_scannable_name(&path) {
+            Candidate::Iso
+        } else {
+            continue;
+        };
+        walked.found.push(FoundFile {
+            size_bytes: meta.len(),
+            modified_at: modified_secs(&meta),
+            path,
+            candidate,
+        });
+    }
+}
+
 fn unix_now() -> i64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -555,6 +681,22 @@ fn unix_now() -> i64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn slots_cap_blocking_jobs_per_root_until_they_really_end() {
+        let slots = Slots::default();
+        let (a, b) = (LibraryRootId(1), LibraryRootId(2));
+        let first = slots.try_take(a, 1).unwrap();
+        assert!(
+            slots.try_take(a, 1).is_none(),
+            "a stuck walk blocks another"
+        );
+        let other = slots.try_take(b, 1).unwrap();
+        drop(first);
+        assert!(slots.try_take(a, 1).is_some());
+        drop(other);
+        assert!(slots.0.lock().unwrap().is_empty());
+    }
 
     #[test]
     fn video_file_filter() {
