@@ -661,3 +661,97 @@ async fn crash_after_move_of_disc_folder_finishes_from_dest_tree() {
     assert_eq!(stored.size_bytes, 5 + 5000);
     assert_eq!(PathBuf::from(&stored.path), dest);
 }
+
+#[tokio::test]
+async fn crash_after_move_of_disc_folder_with_empty_source_dir_finishes() {
+    let env = env().await;
+    let root = env.root("library").await;
+    let dest = dest_folder(&root);
+    write_disc_tree(&dest);
+    let source = env.downloads.join(RELEASE);
+    std::fs::create_dir_all(&source).unwrap();
+    let job = JobId::new();
+    SqliteImportLedger::new(&env.db)
+        .put_pending(&LedgerEntry {
+            job_id: job.to_string(),
+            state: LedgerState::Pending,
+            movie_id: env.movie,
+            root_id: root.id,
+            kind: MediaKind::DiscFolder,
+            source_path: source.to_string_lossy().into_owned(),
+            dest_path: dest.to_string_lossy().into_owned(),
+            mode: TransferMode::Move,
+            size_bytes: 5 + 5000,
+            media_file_id: None,
+        })
+        .await
+        .unwrap();
+    let id = imported(
+        env.handler(|o| o.mode = TransferMode::Move)
+            .import(env.completed(job))
+            .await,
+    );
+    let stored = SqliteMediaFileStore::new(&env.db)
+        .get(id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(stored.kind, MediaKind::DiscFolder);
+    assert_eq!(stored.size_bytes, 5 + 5000);
+    assert!(!source.exists(), "leftover empty source folder cleaned up");
+}
+
+#[tokio::test]
+async fn disc_folder_resume_clears_stale_partials() {
+    let env = env().await;
+    let root = env.root("library").await;
+    let source = env.downloads.join(RELEASE);
+    write_disc_tree(&source);
+    let dest = dest_folder(&root);
+    std::fs::create_dir_all(dest.join("BDMV/STREAM")).unwrap();
+    std::fs::write(dest.join("BDMV/index.bdmv"), b"idx!!").unwrap();
+    let partial = dest.join("BDMV/STREAM/00001.m2ts.reelarr-partial");
+    std::fs::write(&partial, vec![b'x'; 100]).unwrap();
+    let job = JobId::new();
+    SqliteImportLedger::new(&env.db)
+        .put_pending(&LedgerEntry {
+            job_id: job.to_string(),
+            state: LedgerState::Pending,
+            movie_id: env.movie,
+            root_id: root.id,
+            kind: MediaKind::DiscFolder,
+            source_path: source.to_string_lossy().into_owned(),
+            dest_path: dest.to_string_lossy().into_owned(),
+            mode: TransferMode::Copy,
+            size_bytes: 5 + 5000,
+            media_file_id: None,
+        })
+        .await
+        .unwrap();
+    let id = imported(
+        env.handler(|o| o.mode = TransferMode::Copy)
+            .import(env.completed(job))
+            .await,
+    );
+    assert_eq!(
+        dest.join("BDMV/STREAM/00001.m2ts")
+            .metadata()
+            .unwrap()
+            .len(),
+        5000
+    );
+    assert!(!partial.exists());
+    let stored = SqliteMediaFileStore::new(&env.db)
+        .get(id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(stored.kind, MediaKind::DiscFolder);
+    assert_eq!(stored.size_bytes, 5 + 5000);
+    let entry = SqliteImportLedger::new(&env.db)
+        .get(&job.to_string())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(entry.state, LedgerState::Done);
+}

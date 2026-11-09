@@ -121,7 +121,17 @@ impl<P: Prober, R: ReleaseMatcher> MediaImportHandler<P, R> {
             // with no known files still looks Online, so dest NotFound or
             // unreadable is retryable RootOffline rather than "data lost".
             // Wrong-size dest (or a non-file) is a permanent conflict.
-            if entry.mode == TransferMode::Move && !exists(Path::new(&entry.source_path)).await {
+            //
+            // Disc-folder moves are checked even when the source path still
+            // exists: `remove_tree_sources` used to leave an empty walk-root
+            // folder, and prepare then reported "no importable video". If
+            // the dest tree is complete, finish from the ledger and clean
+            // up that leftover source. An incomplete dest with the source
+            // still present falls through so place() can resume.
+            let source_gone = !exists(Path::new(&entry.source_path)).await;
+            if entry.mode == TransferMode::Move
+                && (source_gone || entry.kind == MediaKind::DiscFolder)
+            {
                 let dest = PathBuf::from(&entry.dest_path);
                 let root = self.root(entry.root_id).await?;
                 self.check_health(&root).await?;
@@ -145,6 +155,9 @@ impl<P: Prober, R: ReleaseMatcher> MediaImportHandler<P, R> {
                     Ok(true) => {
                         ensure_dest_inside(&root, &dest).await?;
                         let _ = tokio::fs::remove_file(partial_path(&dest)).await;
+                        if entry.kind == MediaKind::DiscFolder {
+                            cleanup_leftover_source(Path::new(&entry.source_path)).await;
+                        }
                         let probe = if entry.kind.is_disc() {
                             None
                         } else {
@@ -157,13 +170,15 @@ impl<P: Prober, R: ReleaseMatcher> MediaImportHandler<P, R> {
                         self.ledger.mark_done(&job, id).await?;
                         return Ok(ImportResult::Imported { media_file_id: id });
                     }
-                    Ok(false) => {
+                    Ok(false) if source_gone => {
                         return Err(Failure::permanent(format!(
                             "a different file already exists at {}",
                             dest.display()
                         ))
                         .with_code(FailureCode::DestinationConflict));
                     }
+                    Ok(false) => {}
+                    Err(e) if e.kind() == std::io::ErrorKind::NotFound && !source_gone => {}
                     Err(e) => {
                         return Err(Failure::retryable(format!(
                             "library folder {} is unavailable: {e}",
@@ -457,6 +472,20 @@ fn dest_stays_inside(root: &Path, dest: &Path) -> std::io::Result<bool> {
 
 async fn exists(path: &Path) -> bool {
     tokio::fs::symlink_metadata(path).await.is_ok()
+}
+
+/// Best-effort cleanup of a leftover download tree after a finished move
+/// whose destination is already complete.
+async fn cleanup_leftover_source(path: &Path) {
+    match tokio::fs::symlink_metadata(path).await {
+        Ok(meta) if meta.is_dir() => {
+            let _ = tokio::fs::remove_dir_all(path).await;
+        }
+        Ok(_) => {
+            let _ = tokio::fs::remove_file(path).await;
+        }
+        Err(_) => {}
+    }
 }
 
 /// Whether `dest` is the transfer of `src`: the same inode (a hardlink), or

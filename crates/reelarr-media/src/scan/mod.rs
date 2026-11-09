@@ -672,7 +672,7 @@ fn fill_metadata(walked: &mut Walked, pending: Vec<(PathBuf, Candidate)>) {
                             candidate: *candidate,
                         }),
                         Ok(_) => Err(format!("{} is not a regular file", path.display())),
-                        Err(e) => Err(e.to_string()),
+                        Err(e) => Err(format!("{}: {e}", path.display())),
                     })
                 })
                 .collect();

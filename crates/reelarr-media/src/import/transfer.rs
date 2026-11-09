@@ -106,7 +106,9 @@ pub fn transfer(src: &Path, dest: &Path, mode: TransferMode) -> Result<Transferr
                 Err(e) if e.kind() == io::ErrorKind::AlreadyExists => Err(TransferError::Dest(e)),
                 Err(e) => {
                     if e.raw_os_error() == Some(libc::EXDEV) {
-                        tracing::debug!("hardlink crossed filesystems (EXDEV), copying instead");
+                        tracing::debug!(
+                            "move crossed filesystems (EXDEV), copying then deleting the source"
+                        );
                     }
                     safe_copy(src, dest)?;
                     fs::remove_file(src).map_err(TransferError::Source)?;
@@ -187,7 +189,12 @@ fn copy_bytes(src: &Path, out: &mut fs::File) -> Result<(), TransferError> {
 /// already ignores names ending in [`PARTIAL_SUFFIX`].
 pub fn write_probe(dir: &Path) -> Result<(), TransferError> {
     fs::create_dir_all(dir).map_err(TransferError::Dest)?;
-    let probe = dir.join(format!("write-check{PARTIAL_SUFFIX}"));
+    static PROBE_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let seq = PROBE_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let probe = dir.join(format!(
+        "write-check-{}-{seq}{PARTIAL_SUFFIX}",
+        std::process::id()
+    ));
     let _ = fs::remove_file(&probe);
     let result = (|| {
         let file = fs::OpenOptions::new()
@@ -258,9 +265,12 @@ pub fn transfer_tree(
                         format!("a different file already exists at {}", dest_file.display()),
                     )));
                 }
+                let _ = fs::remove_file(partial_path(dest_file));
                 continue;
             }
-            Err(e) if e.kind() == io::ErrorKind::NotFound => {}
+            Err(e) if e.kind() == io::ErrorKind::NotFound => {
+                let _ = fs::remove_file(partial_path(dest_file));
+            }
             Err(e) => return Err(TransferError::Dest(e)),
         }
         match transfer(src_file, dest_file, file_mode)? {
@@ -280,7 +290,9 @@ pub fn transfer_tree(
                 ))));
             }
         }
-        remove_tree_sources(&files)?;
+        let (walk_root, _) = tree_walk_root(src)?;
+        remove_tree_sources(&files, &walk_root)?;
+
         return Ok(Transferred::Moved);
     }
     Ok(if copied > 0 {
@@ -373,7 +385,10 @@ fn tree_walk_root(src: &Path) -> Result<(PathBuf, bool), TransferError> {
     ))))
 }
 
-fn remove_tree_sources(files: &[(PathBuf, PathBuf)]) -> Result<(), TransferError> {
+fn remove_tree_sources(
+    files: &[(PathBuf, PathBuf)],
+    walk_root: &Path,
+) -> Result<(), TransferError> {
     let mut dirs: Vec<PathBuf> = Vec::new();
     for (src_file, _) in files {
         fs::remove_file(src_file).map_err(TransferError::Source)?;
@@ -386,6 +401,10 @@ fn remove_tree_sources(files: &[(PathBuf, PathBuf)]) -> Result<(), TransferError
     for dir in dirs {
         let _ = fs::remove_dir(dir);
     }
+    // Best effort: drop the walk root itself once every copied file is gone.
+    // `remove_dir` leaves it alone if leftover extras (a sibling cover.jpg)
+    // are still there, which is what we want for a bare VIDEO_TS download.
+    let _ = fs::remove_dir(walk_root);
     Ok(())
 }
 
@@ -490,6 +509,43 @@ mod tests {
         assert!(dest_tree_complete(&dest, 15).unwrap());
         assert!(!src.join("BDMV/index.bdmv").exists());
         assert!(!src.join("BDMV/STREAM/00001.m2ts").exists());
+        assert!(
+            !src.exists(),
+            "walk root removed after a finished tree move"
+        );
+    }
+
+    #[test]
+    fn tree_resume_clears_stale_partials() {
+        let dir = tempfile::tempdir().unwrap();
+        let src = bluray_tree(dir.path());
+        let dest = dir.path().join("library/Movie (2010)");
+        fs::create_dir_all(dest.join("BDMV/STREAM")).unwrap();
+        fs::write(dest.join("BDMV/index.bdmv"), b"idx").unwrap();
+        let partial = dest.join(format!("BDMV/STREAM/00001.m2ts{PARTIAL_SUFFIX}"));
+        fs::write(&partial, b"stale").unwrap();
+        assert_eq!(
+            transfer_tree(&src, &dest, TransferMode::Copy).unwrap(),
+            Transferred::Copied
+        );
+        assert_eq!(
+            fs::read(dest.join("BDMV/STREAM/00001.m2ts")).unwrap(),
+            b"stream-bytes"
+        );
+        assert!(!partial.exists());
+        assert!(dest_tree_complete(&dest, 15).unwrap());
+    }
+
+    #[test]
+    fn dest_tree_complete_ignores_leftover_partials() {
+        let dir = tempfile::tempdir().unwrap();
+        let dest = bluray_tree(&dir.path().join("library"));
+        fs::write(
+            dest.join(format!("BDMV/STREAM/00001.m2ts{PARTIAL_SUFFIX}")),
+            b"stale-bytes",
+        )
+        .unwrap();
+        assert!(dest_tree_complete(&dest, 15).unwrap());
     }
 
     #[test]
@@ -514,23 +570,37 @@ mod tests {
         let folder = dir.path().join("library");
         write_probe(&folder).unwrap();
         assert!(folder.is_dir());
-        assert!(!folder.join(format!("write-check{PARTIAL_SUFFIX}")).exists());
+        let leftovers: Vec<_> = fs::read_dir(&folder)
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .filter(|e| e.file_name().to_string_lossy().ends_with(PARTIAL_SUFFIX))
+            .collect();
+        assert!(leftovers.is_empty(), "{leftovers:?}");
     }
 
     #[test]
     fn hardlink_falls_back_to_copy_across_devices() {
         let shm = Path::new("/dev/shm");
         if !shm.is_dir() {
+            eprintln!("skipping cross-device hardlink test: /dev/shm is not a directory");
             return;
         }
         let src_dir = match tempfile::tempdir_in(shm) {
             Ok(dir) => dir,
-            Err(_) => return,
+            Err(e) => {
+                eprintln!(
+                    "skipping cross-device hardlink test: cannot create a temp dir in /dev/shm ({e})"
+                );
+                return;
+            }
         };
         let dest_dir = tempfile::tempdir().unwrap();
         if fs::metadata(src_dir.path()).unwrap().dev()
             == fs::metadata(dest_dir.path()).unwrap().dev()
         {
+            eprintln!(
+                "skipping cross-device hardlink test: /dev/shm and the dest are on the same device"
+            );
             return;
         }
         let src = src_dir.path().join("src.mkv");
