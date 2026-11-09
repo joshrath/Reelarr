@@ -9,9 +9,9 @@ use leptos_router::{
 
 use crate::components::layout::Layout;
 use crate::pages::{
-    back_room::BackRoomPage, counter::CounterPage, employees_only::EmployeesOnlyPage,
-    login::LoginPage, not_found::NotFoundPage, record_corner::RecordCornerPage,
-    store_floor::StoreFloorPage, watch::WatchPage,
+    back_room::BackRoomPage, case::CasePage, counter::CounterPage,
+    employees_only::EmployeesOnlyPage, login::LoginPage, not_found::NotFoundPage,
+    record_corner::RecordCornerPage, store_floor::StoreFloorPage, watch::WatchPage,
 };
 use crate::theme::{Prefs, PrefsSignal};
 
@@ -65,6 +65,10 @@ pub fn App() -> impl IntoView {
                 <Route
                     path=StaticSegment("employees-only")
                     view=|| view! { <Layout><EmployeesOnlyPage /></Layout> }
+                />
+                <Route
+                    path=(StaticSegment("case"), ParamSegment("id"))
+                    view=|| view! { <Layout><CasePage /></Layout> }
                 />
                 <Route
                     path=(StaticSegment("watch"), ParamSegment("id"))
