@@ -525,6 +525,12 @@ async fn crash_after_move_wrong_size_dest_is_a_conflict() {
         failed(result),
         (false, Some(FailureCode::DestinationConflict))
     );
+    let entry = SqliteImportLedger::new(&env.db)
+        .get(&job.to_string())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(entry.state, LedgerState::Pending);
 }
 
 #[tokio::test]
