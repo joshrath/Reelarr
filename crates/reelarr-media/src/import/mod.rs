@@ -17,11 +17,13 @@
 //! `ImportHandler` contract from `reelarr-core` (#29) is a thin adapter over
 //! it.
 
+pub mod handler;
 pub mod matcher;
 pub mod naming;
 pub mod select;
 pub mod transfer;
 
+pub use handler::{HandlerOptions, MediaImportHandler};
 pub use matcher::{ReleaseMatcher, TitleYearMatcher};
 pub use naming::{DEFAULT_TEMPLATE, NamingValues};
 pub use transfer::{TransferMode, Transferred};
@@ -29,7 +31,10 @@ pub use transfer::{TransferMode, Transferred};
 use std::path::{Path, PathBuf};
 use std::time::UNIX_EPOCH;
 
-use reelarr_types::{LibraryRootId, MediaFileId, MediaFileStatus, MediaKind, MovieId};
+use reelarr_core::FailureCode;
+use reelarr_types::{
+    LibraryRootId, MediaFileId, MediaFileStatus, MediaKind, MediaProbe, Movie, MovieId,
+};
 
 use crate::scan::{self, MediaFileStore, NewMediaFile, Prober};
 use crate::store::{MovieStore, StoreError};
@@ -135,12 +140,30 @@ impl<M: MovieStore, F: MediaFileStore, P: Prober, R: ReleaseMatcher> Importer<M,
     }
 
     async fn try_import(&self, request: &ImportRequest) -> Result<ImportOutcome, Failure> {
+        let Some(prepared) = self.prepare(request).await? else {
+            return Ok(ImportOutcome::NoMatch);
+        };
+        let dest = self.options.library_path.join(&prepared.rel_dest);
+        let transferred = self.transfer_into(&prepared, &dest).await?;
+        let media_file_id = self
+            .record(&prepared, self.options.library_root_id, &dest)
+            .await?;
+        Ok(ImportOutcome::Imported {
+            media_file_id,
+            path: dest,
+            transferred,
+        })
+    }
+
+    /// Steps 1 to 3: the movie, the main file and its destination relative
+    /// to a library root. Touches nothing. `None` means no movie matched.
+    async fn prepare(&self, request: &ImportRequest) -> Result<Option<Prepared>, Failure> {
         // 1. Movie.
         let movie_id = match request.movie_id {
             Some(id) => id,
             None => match self.matcher.match_release(&request.release_title).await? {
                 Some(id) => id,
-                None => return Ok(ImportOutcome::NoMatch),
+                None => return Ok(None),
             },
         };
         let movie = self.movies.get(movie_id).await?.ok_or_else(|| {
@@ -214,36 +237,91 @@ impl<M: MovieStore, F: MediaFileStore, P: Prober, R: ReleaseMatcher> Importer<M,
             .and_then(|e| e.to_str())
             .unwrap_or("mkv")
             .to_ascii_lowercase();
-        let dest_dir = parts
+        let rel_dest = parts
             .iter()
-            .fold(self.options.library_path.clone(), |p, c| p.join(c));
-        let dest = dest_dir.join(format!("{stem}.{ext}"));
+            .fold(PathBuf::new(), |p, c| p.join(c))
+            .join(format!("{stem}.{ext}"));
+        if !rel_dest
+            .components()
+            .all(|c| matches!(c, std::path::Component::Normal(_)))
+        {
+            return Err(Failure::permanent(format!(
+                "rename template produced a path outside the library: {}",
+                rel_dest.display()
+            )));
+        }
+        Ok(Some(Prepared {
+            movie,
+            source,
+            kind,
+            source_probe,
+            rel_dest,
+            subtitles: selection.subtitles,
+        }))
+    }
 
-        // 4. Transfer.
+    /// Step 4: transfer the main file and its subtitles to `dest`.
+    async fn transfer_into(
+        &self,
+        prepared: &Prepared,
+        dest: &Path,
+    ) -> Result<Transferred, Failure> {
         let mode = self.options.mode;
-        let (src, dst, dir) = (source.clone(), dest.clone(), dest_dir.clone());
+        let dest_dir = dest.parent().map(Path::to_owned).unwrap_or_default();
+        let (src, dst) = (prepared.source.clone(), dest.to_owned());
         let transferred = blocking(move || {
-            std::fs::create_dir_all(&dir)?;
+            std::fs::create_dir_all(&dest_dir)?;
             transfer::transfer(&src, &dst, mode)
         })
         .await?;
+        self.transfer_subtitles(prepared, dest).await;
+        Ok(transferred)
+    }
 
-        if self.options.import_subtitles && !kind.is_disc() {
-            let subs = selection.subtitles.clone();
-            let (src, dst) = (source.clone(), dest.clone());
-            let copied = blocking(move || Ok(copy_subtitles(&src, &dst, &subs, mode))).await?;
-            if copied > 0 {
-                tracing::debug!(copied, "imported subtitle sidecars");
-            }
+    async fn transfer_subtitles(&self, prepared: &Prepared, dest: &Path) {
+        if !self.options.import_subtitles || prepared.kind.is_disc() {
+            return;
         }
+        let subs = prepared.subtitles.clone();
+        let (src, dst) = (prepared.source.clone(), dest.to_owned());
+        let mode = self.options.mode;
+        if let Ok(copied) = blocking(move || Ok(copy_subtitles(&src, &dst, &subs, mode))).await
+            && copied > 0
+        {
+            tracing::debug!(copied, "imported subtitle sidecars");
+        }
+    }
 
-        // 5. Record.
+    /// Step 5: probe the imported file and record it under `root_id`.
+    async fn record(
+        &self,
+        prepared: &Prepared,
+        root_id: LibraryRootId,
+        dest: &Path,
+    ) -> Result<MediaFileId, Failure> {
+        let kind = prepared.kind;
         let probe = if kind.is_disc() {
             None
         } else {
-            self.prober.probe(&dest).await.ok().or(source_probe)
+            self.prober
+                .probe(dest)
+                .await
+                .ok()
+                .or_else(|| prepared.source_probe.clone())
         };
-        let meta = tokio::fs::metadata(&dest)
+        self.record_file(prepared.movie.id, root_id, dest, kind, probe)
+            .await
+    }
+
+    async fn record_file(
+        &self,
+        movie_id: MovieId,
+        root_id: LibraryRootId,
+        dest: &Path,
+        kind: MediaKind,
+        probe: Option<MediaProbe>,
+    ) -> Result<MediaFileId, Failure> {
+        let meta = tokio::fs::metadata(dest)
             .await
             .map_err(|e| Failure::retryable(format!("cannot read imported file: {e}")))?;
         let modified_at = meta
@@ -255,7 +333,8 @@ impl<M: MovieStore, F: MediaFileStore, P: Prober, R: ReleaseMatcher> Importer<M,
         let dest_str = dest.to_string_lossy().into_owned();
         let media_file_id = match self.files.get_by_path(&dest_str).await? {
             Some(mut existing) => {
-                existing.movie_id = Some(movie.id);
+                existing.movie_id = Some(movie_id);
+                existing.root_id = root_id;
                 existing.size_bytes = meta.len();
                 existing.modified_at = modified_at;
                 existing.status = MediaFileStatus::Present;
@@ -267,8 +346,8 @@ impl<M: MovieStore, F: MediaFileStore, P: Prober, R: ReleaseMatcher> Importer<M,
             None => {
                 self.files
                     .insert(NewMediaFile {
-                        movie_id: Some(movie.id),
-                        root_id: self.options.library_root_id,
+                        movie_id: Some(movie_id),
+                        root_id,
                         path: dest_str,
                         size_bytes: meta.len(),
                         modified_at,
@@ -279,18 +358,21 @@ impl<M: MovieStore, F: MediaFileStore, P: Prober, R: ReleaseMatcher> Importer<M,
                     .id
             }
         };
-        tracing::info!(
-            movie = %movie.metadata.title,
-            dest = %dest.display(),
-            ?transferred,
-            "imported movie"
-        );
-        Ok(ImportOutcome::Imported {
-            media_file_id,
-            path: dest,
-            transferred,
-        })
+        tracing::info!(?movie_id, dest = %dest.display(), "imported movie");
+        Ok(media_file_id)
     }
+}
+
+/// A download ready to transfer: everything decided, nothing touched.
+#[derive(Debug, Clone)]
+struct Prepared {
+    movie: Movie,
+    source: PathBuf,
+    kind: MediaKind,
+    source_probe: Option<MediaProbe>,
+    /// Destination relative to the library root; only normal components.
+    rel_dest: PathBuf,
+    subtitles: Vec<PathBuf>,
 }
 
 /// Copy or link subtitle sidecars, keeping language suffixes such as `.en`
@@ -337,6 +419,7 @@ fn copy_subtitles(source: &Path, dest: &Path, subs: &[PathBuf], mode: TransferMo
 struct Failure {
     reason: String,
     retryable: bool,
+    code: Option<FailureCode>,
 }
 
 impl Failure {
@@ -344,13 +427,19 @@ impl Failure {
         Self {
             reason,
             retryable: false,
+            code: None,
         }
     }
     fn retryable(reason: String) -> Self {
         Self {
             reason,
             retryable: true,
+            code: None,
         }
+    }
+    fn with_code(mut self, code: FailureCode) -> Self {
+        self.code = Some(code);
+        self
     }
 }
 
@@ -360,11 +449,37 @@ impl From<StoreError> for Failure {
     }
 }
 
+// Linux errnos for library write failures.
+const EPERM: i32 = 1;
+const EIO: i32 = 5;
+const EACCES: i32 = 13;
+const ENOSPC: i32 = 28;
+const EROFS: i32 = 30;
+const ENOTCONN: i32 = 107;
+const ETIMEDOUT: i32 = 110;
+const EHOSTDOWN: i32 = 112;
+const EHOSTUNREACH: i32 = 113;
+const ESTALE: i32 = 116;
+
 impl From<std::io::Error> for Failure {
+    /// Disk full and a vanished share are worth retrying; a read-only or
+    /// forbidden library and an existing destination are not.
     fn from(e: std::io::Error) -> Self {
-        match e.kind() {
-            std::io::ErrorKind::AlreadyExists => {
-                Self::permanent(format!("not overwriting existing library file: {e}"))
+        if e.kind() == std::io::ErrorKind::AlreadyExists {
+            return Self::permanent(format!("not overwriting existing library file: {e}"))
+                .with_code(FailureCode::DestinationConflict);
+        }
+        match e.raw_os_error() {
+            Some(ENOSPC) => {
+                Self::retryable(format!("library is full: {e}")).with_code(FailureCode::DiskFull)
+            }
+            Some(EROFS | EACCES | EPERM) => {
+                Self::permanent(format!("library refused the write: {e}"))
+                    .with_code(FailureCode::LibraryPermissionDenied)
+            }
+            Some(ESTALE | ENOTCONN | EIO | EHOSTDOWN | EHOSTUNREACH | ETIMEDOUT) => {
+                Self::retryable(format!("library share is unavailable: {e}"))
+                    .with_code(FailureCode::RootOffline)
             }
             _ => Self::retryable(format!("file operation failed: {e}")),
         }

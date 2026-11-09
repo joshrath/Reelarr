@@ -102,6 +102,10 @@ async fn failed_transition_is_atomic_and_retry_clears_failure(factory: &dyn Stor
         FailureCode::Duplicate,
         FailureCode::NoMatch,
         FailureCode::PathUnmapped,
+        FailureCode::RootOffline,
+        FailureCode::LibraryPermissionDenied,
+        FailureCode::NoDefaultRoot,
+        FailureCode::DestinationConflict,
         FailureCode::Other,
     ];
     for (index, code) in codes.into_iter().enumerate() {
