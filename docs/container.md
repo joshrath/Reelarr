@@ -49,3 +49,24 @@ The script requires Docker, Python 3 and curl **on the host** only. CI runs it a
 exports the exact runtime inventory as the `runtime-licenses` artifact.
 
 [License inventory and redistribution obligations](licenses.md).
+
+## Secret key volume
+
+The #70 indexer store provides an injectable encrypted-secret policy, pending
+Josh's final decision; server wiring follows separately in #76. Its default
+startup initializer uses `REELARR_SECRET_KEY` (standard base64, exactly 32 bytes)
+or atomically loads/creates `$REELARR_DATA_DIR/secret.key`, normally
+`/config/secret.key` (32 raw bytes). Keep `/config` persistent and private. The
+initializer runs **after** privilege drop, so the file is owned by PUID with mode
+0600, not by root; pre-provisioned files must have that same ownership/mode.
+Never chown library mounts to fix a key-file error. Overrides of the data directory
+must be pre-provisioned, as described above. A malformed/unsafe existing key is
+never overwritten or silently replaced.
+
+XChaCha20-Poly1305 protects database copies/backups **only when they do not include
+the key file**. It is not protection against a compromised container or a full
+`/config` backup containing both DB and key. Back up the key separately and
+securely; losing the key means re-entering secrets. Do not change/remove an env
+key or replace `secret.key` during an upgrade. No API returns stored credentials.
+See [deployment.md](deployment.md#indexer-secret-storage-store-integration-70)
+for initialization, API-safe read methods and the exact threat model.

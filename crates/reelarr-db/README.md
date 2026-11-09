@@ -71,3 +71,24 @@ bound rather than silently discarding jobs.
 All NZB document/segment storage remains behind reelarr-nzb's NzbStore. Its SQL
 adapter/migrations belong here when implemented; this adapter does not persist
 per-segment completion or introduce a second database.
+
+## Indexers and secrets
+
+`SqliteIndexerStore::new(&db, Arc<dyn SecretCipher>)` implements the existing
+`reelarr_indexer::IndexerStore`, validates before every upsert, and uses single
+SQL statements for atomic CRUD. Non-secret settings are versioned JSON (including
+nanosecond-precision durations); `extra_download_hosts` is its own ordered JSON
+array. Migration 0007 creates the indexer table.
+
+The default `secrets::XChaChaSecretCipher` encrypts API keys, with a versioned
+ciphertext, per-write nonce and record/field-bound associated data. No API keys
+are serialized into the settings. Encrypting indexer API keys and NNTP passwords
+with XChaCha20-Poly1305 is the decided policy; `SecretCipher` stays an internal
+abstraction. The API never returns secrets and logs never show them. The store does not itself load
+keys or change server startup: callers initialize the cipher once at startup.
+See [deployment](../../docs/deployment.md#indexer-secret-storage-store-integration-70)
+for environment/key-file configuration and backup/recovery implications.
+
+`IndexerStore` reads are internal and include `SecretString` for building clients.
+Use `list_summaries` / `get_summary` for API-facing reads, never the full config.
+They do not decrypt keys, and report `has_api_key` only. No HTTP routes are added.
