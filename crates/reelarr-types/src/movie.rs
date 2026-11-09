@@ -297,3 +297,20 @@ pub struct NewLibraryRoot {
     #[serde(default)]
     pub rescan_interval_secs: Option<u64>,
 }
+
+#[cfg(test)]
+mod media_kind_tests {
+    use super::MediaKind;
+
+    #[test]
+    fn unrecognized_images_are_not_discs_and_not_streamable() {
+        assert!(!MediaKind::UnrecognizedImage.is_disc());
+        assert!(!MediaKind::UnrecognizedImage.is_streamable());
+        assert!(MediaKind::DiscImage.is_disc());
+        assert!(!MediaKind::DiscImage.is_streamable());
+        assert!(MediaKind::DiscFolder.is_disc());
+        assert!(!MediaKind::DiscFolder.is_streamable());
+        assert!(!MediaKind::File.is_disc());
+        assert!(MediaKind::File.is_streamable());
+    }
+}

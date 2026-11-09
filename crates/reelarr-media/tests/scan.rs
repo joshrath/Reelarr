@@ -431,3 +431,25 @@ async fn loose_video_beside_a_disc_structure_is_recorded_too() {
     let report = s.scan_root(&root(dir.path())).await.unwrap();
     assert_eq!((report.added, report.updated), (0, 0));
 }
+
+/// Regression (#80 review): loose_files followed symlinks, so a Movie.mkv
+/// link beside BDMV/ pointing outside the root could be listed and probed.
+#[tokio::test]
+async fn symlink_beside_a_disc_structure_is_not_recorded() {
+    let dir = tempfile::tempdir().unwrap();
+    write(dir.path(), "Movie (2010)/BDMV/index.bdmv", b"x");
+    write(dir.path(), "Movie (2010)/BDMV/STREAM/00000.m2ts", b"aaaa");
+    let outside = tempfile::tempdir().unwrap();
+    let secret = outside.path().join("secret.mkv");
+    std::fs::write(&secret, b"should not be scanned").unwrap();
+    std::os::unix::fs::symlink(&secret, dir.path().join("Movie (2010)/Movie (2010).mkv")).unwrap();
+
+    let s = scanner();
+    let report = s.scan_root(&root(dir.path())).await.unwrap();
+    assert_eq!(report.added, 1);
+    let files = s.store().list_by_root(LibraryRootId(1)).await.unwrap();
+    assert_eq!(files.len(), 1, "{files:?}");
+    assert!(files[0].path.ends_with("Movie (2010)"));
+    assert_eq!(files[0].kind, MediaKind::DiscFolder);
+    assert!(files.iter().all(|f| !f.path.ends_with(".mkv")));
+}

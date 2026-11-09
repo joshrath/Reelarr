@@ -638,6 +638,23 @@ fn loose_files(dir: &Path, walked: &mut Walked) {
             }
         };
         let path = entry.path();
+        // Match the main walk: file_type() does not follow symlinks, so a
+        // Movie.mkv link pointing outside the root is not listed or probed.
+        match entry.file_type() {
+            Ok(ft) if ft.is_file() => {}
+            Ok(_) => continue,
+            Err(e) => {
+                walked.errors.push(format!("{}: {e}", path.display()));
+                continue;
+            }
+        }
+        let meta = match entry.metadata() {
+            Ok(meta) => meta,
+            Err(e) => {
+                walked.errors.push(format!("{}: {e}", path.display()));
+                continue;
+            }
+        };
         let candidate = if is_video_file(&path) {
             Candidate::Video
         } else if disc::is_iso_path(&path) && is_scannable_name(&path) {
@@ -645,16 +662,12 @@ fn loose_files(dir: &Path, walked: &mut Walked) {
         } else {
             continue;
         };
-        match entry.metadata() {
-            Ok(meta) if meta.is_file() => walked.found.push(FoundFile {
-                size_bytes: meta.len(),
-                modified_at: modified_secs(&meta),
-                path,
-                candidate,
-            }),
-            Ok(_) => {}
-            Err(e) => walked.errors.push(format!("{}: {e}", path.display())),
-        }
+        walked.found.push(FoundFile {
+            size_bytes: meta.len(),
+            modified_at: modified_secs(&meta),
+            path,
+            candidate,
+        });
     }
 }
 
