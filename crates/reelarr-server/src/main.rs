@@ -1,10 +1,17 @@
 use std::{net::SocketAddr, path::PathBuf};
 
+mod healthcheck;
+
 use reelarr_db::Database;
 use reelarr_server::{app_with_ui, check_site, leptos_options, state::AppState};
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    match std::env::args().nth(1).as_deref() {
+        Some("healthcheck") => return healthcheck::run(),
+        Some(arg) => return Err(format!("unknown command: {arg}").into()),
+        None => {}
+    }
     tracing_subscriber::fmt::init();
 
     let leptos_options = match leptos_options().and_then(|o| check_site(&o).map(|()| o)) {

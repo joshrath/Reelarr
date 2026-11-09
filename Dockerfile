@@ -34,14 +34,32 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry \
 
 FROM debian:bookworm-slim
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends ffmpeg ca-certificates tini \
+    && apt-get install -y --no-install-recommends ffmpeg ca-certificates tini util-linux \
+    && rm -f /usr/bin/ffplay /usr/bin/qt-faststart \
+    && mkdir -p /config /usr/share/reelarr/licenses \
+    && chown 1000:1000 /config \
     && rm -rf /var/lib/apt/lists/*
+COPY docker/check-runtime.sh /usr/local/share/reelarr/check-runtime.sh
+COPY docs/licenses.md /usr/share/reelarr/licenses/README.md
+COPY LICENSE /usr/share/reelarr/licenses/Reelarr-LICENSE
+RUN /usr/local/share/reelarr/check-runtime.sh \
+    && dpkg-query -W > /usr/share/reelarr/licenses/packages.tsv \
+    && ffmpeg -version > /usr/share/reelarr/licenses/ffmpeg-version.txt 2>&1 \
+    && ffmpeg -buildconf > /usr/share/reelarr/licenses/ffmpeg-buildconf.txt 2>&1 \
+    && ffmpeg -L > /usr/share/reelarr/licenses/ffmpeg-license.txt 2>&1 \
+    && tini --version > /usr/share/reelarr/licenses/tini-version.txt 2>&1
+COPY --chmod=755 docker/entrypoint.sh /usr/local/bin/reelarr-entrypoint
 COPY --from=builder /out/reelarr /usr/local/bin/reelarr
 COPY --from=builder /out/site /usr/share/reelarr/site
-ENV REELARR_PORT=7979 \
+ENV PUID=1000 \
+    PGID=1000 \
+    REELARR_PORT=7979 \
     LEPTOS_SITE_ROOT=/usr/share/reelarr/site \
     LEPTOS_ENV=PROD
 VOLUME ["/config", "/media", "/downloads"]
 EXPOSE 7979
-ENTRYPOINT ["/usr/bin/tini", "--"]
+USER 1000:1000
+HEALTHCHECK --interval=10s --timeout=5s --start-period=30s --retries=3 \
+    CMD ["/usr/local/bin/reelarr-entrypoint", "/usr/local/bin/reelarr", "healthcheck"]
+ENTRYPOINT ["/usr/bin/tini", "--", "/usr/local/bin/reelarr-entrypoint"]
 CMD ["reelarr"]

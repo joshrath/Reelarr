@@ -39,6 +39,11 @@ get the full `200` response. `If-Range` and `If-None-Match` are honored.
 Unknown ids, missing files, and anything that resolves (via symlinks or
 `..`) outside its library root are `404`.
 
+Both routes return `503` with code `unavailable` when the file's library
+folder failed its last health check (for example an unmounted network
+share), so the player can say the share is offline rather than that the
+movie is gone. `500 lookup_failed` means the lookup itself failed.
+
 ## Direct-play rules
 
 | Container | Video | Audio |

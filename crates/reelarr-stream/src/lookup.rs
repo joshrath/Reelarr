@@ -22,11 +22,21 @@ pub struct PlayableFile {
 #[error("{0}")]
 pub struct LookupError(pub String);
 
-pub type LookupFuture<'a> =
-    Pin<Box<dyn Future<Output = Result<Option<PlayableFile>, LookupError>> + Send + 'a>>;
+/// Result of looking up a media file.
+#[derive(Debug, Clone, PartialEq)]
+pub enum Lookup {
+    Found(PlayableFile),
+    /// Unknown id, or a file a scan found missing.
+    NotFound,
+    /// Known file whose library root is offline (e.g. an unmounted share).
+    Unavailable {
+        reason: String,
+    },
+}
 
-/// Resolves a media file id to something playable. Implementations return
-/// `None` for unknown ids and for files currently marked missing.
+pub type LookupFuture<'a> = Pin<Box<dyn Future<Output = Result<Lookup, LookupError>> + Send + 'a>>;
+
+/// Resolves a media file id to something playable.
 pub trait MediaLookup: Send + Sync {
     fn lookup(&self, id: MediaFileId) -> LookupFuture<'_>;
 }
@@ -58,6 +68,6 @@ impl MediaLookup for InMemoryMediaLookup {
             .expect("lookup lock poisoned")
             .get(&id)
             .cloned();
-        Box::pin(async move { Ok(file) })
+        Box::pin(async move { Ok(file.map_or(Lookup::NotFound, Lookup::Found)) })
     }
 }

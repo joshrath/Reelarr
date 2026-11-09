@@ -11,7 +11,9 @@ pub mod range;
 pub mod serve;
 
 pub use compat::{Browser, ClientProfile};
-pub use lookup::{InMemoryMediaLookup, LookupError, MediaLookup, PlayableFile};
+pub use lookup::{
+    InMemoryMediaLookup, Lookup, LookupError, LookupFuture, MediaLookup, PlayableFile,
+};
 
 use axum::Json;
 use axum::http::{HeaderMap, Method, StatusCode};
@@ -23,6 +25,8 @@ use reelarr_types::{ApiError, MediaFileId, PlaybackInfo, PlaybackMethod};
 pub enum StreamError {
     #[error("media file not found")]
     NotFound,
+    #[error("media file unavailable: {0}")]
+    Unavailable(String),
     #[error("media lookup failed: {0}")]
     Lookup(#[from] LookupError),
 }
@@ -35,14 +39,21 @@ impl IntoResponse for StreamError {
                 "not_found",
                 "That media file does not exist or is not available",
             ),
+            StreamError::Unavailable(_) => (
+                StatusCode::SERVICE_UNAVAILABLE,
+                "unavailable",
+                "This file's library folder is offline. Check that the network share is mounted.",
+            ),
             StreamError::Lookup(_) => (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 "lookup_failed",
                 "The library is unavailable",
             ),
         };
-        if let StreamError::Lookup(e) = &self {
-            tracing::error!(error = %e, "media lookup failed");
+        match &self {
+            StreamError::Lookup(e) => tracing::error!(error = %e, "media lookup failed"),
+            StreamError::Unavailable(reason) => tracing::debug!(%reason, "media unavailable"),
+            StreamError::NotFound => {}
         }
         (
             status,
@@ -66,7 +77,7 @@ pub async fn playback_info(
     id: MediaFileId,
     client: ClientProfile,
 ) -> Result<PlaybackInfo, StreamError> {
-    let file = lookup.lookup(id).await?.ok_or(StreamError::NotFound)?;
+    let file = found(lookup.lookup(id).await?)?;
     let ext = file.path.extension().and_then(|e| e.to_str());
     let duration_ms = file.probe.as_ref().and_then(|p| p.duration_ms);
     Ok(match compat::check(file.probe.as_ref(), ext, client) {
@@ -97,10 +108,14 @@ pub async fn stream(
     method: &Method,
     headers: &HeaderMap,
 ) -> Response {
-    let file = match lookup.lookup(id).await {
-        Ok(Some(file)) => file,
-        Ok(None) => return StreamError::NotFound.into_response(),
-        Err(e) => return StreamError::Lookup(e).into_response(),
+    let file = match lookup
+        .lookup(id)
+        .await
+        .map_err(StreamError::from)
+        .and_then(found)
+    {
+        Ok(file) => file,
+        Err(e) => return e.into_response(),
     };
     let path = match serve::resolve_within(&file.path, &file.root).await {
         Ok(path) => path,
@@ -113,4 +128,12 @@ pub async fn stream(
     };
     let mime = serve::mime_for_path(&path);
     serve::serve_file(&path, mime, method, headers).await
+}
+
+fn found(lookup: Lookup) -> Result<PlayableFile, StreamError> {
+    match lookup {
+        Lookup::Found(file) => Ok(file),
+        Lookup::NotFound => Err(StreamError::NotFound),
+        Lookup::Unavailable { reason } => Err(StreamError::Unavailable(reason)),
+    }
 }

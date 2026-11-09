@@ -76,6 +76,28 @@ and `InMemoryMediaFileStore` is for tests.
   inotify-style notifications are unreliable on SMB and NFS. Only one scan
   per root runs at a time.
 
+## Library folders and network shares
+
+Library roots, movies and media files are stored in SQLite (`db`:
+`SqliteLibraryRootStore`, `SqliteMovieStore`, `SqliteMediaFileStore`; schema
+in `reelarr-db`'s `0003_library.sql`). Roots must be absolute and may not
+overlap. Removing a root that has files fails unless `forget_files` is set,
+which deletes only the library rows, never files on disk.
+
+Before a scan, `health::scan_checked` checks the root on a blocking thread
+with a 10 second timeout. A missing folder, a path that isn't a folder, an
+empty folder where files were known, stale NFS handles, disconnected shares,
+unreachable or timed-out servers, and I/O errors mark the root `offline`;
+read errors from permissions mark it `permission_denied`. An unhealthy root is
+skipped and its files keep their rows and status. Playback of its files
+returns `503 unavailable` until a later check finds it healthy again. While a
+check of a hung mount is still stuck, further checks of that root report
+offline at once instead of starting more threads.
+
+The server exposes `GET`/`POST /api/v1/library/roots`,
+`POST /api/v1/library/roots/{id}/check` and
+`DELETE /api/v1/library/roots/{id}?forget_files=true` (all signed in).
+
 ## Importing downloads
 
 `import::Importer::import` takes a completed download (`ImportRequest`) and
