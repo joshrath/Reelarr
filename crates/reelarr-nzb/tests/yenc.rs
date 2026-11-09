@@ -576,6 +576,7 @@ async fn checkpoint_only_after_durable_complete_file_and_matching_nzb() {
                 files: vec![nzb(1)],
                 ..Default::default()
             },
+            None,
         )
         .await
         .unwrap();
