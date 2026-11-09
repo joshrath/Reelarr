@@ -3,8 +3,10 @@ use reelarr_db::{
     Database, SqliteIndexerStore, SqliteJobStore, SqliteNntpStore, SqliteNzbStore,
     secrets::{SecretCipher, XChaChaSecretCipher},
 };
-use reelarr_media::db::{DbMediaLookup, SqliteLibraryRootStore};
+use reelarr_media::db::{DbMediaLookup, SqliteLibraryRootStore, SqliteMovieStore};
 use reelarr_media::health::HealthChecker;
+use reelarr_media::import::{HandlerOptions, MediaImportHandler, TitleYearMatcher};
+use reelarr_media::scan::FfprobeProber;
 use reelarr_nzb::{nntp::RootCertStore, worker::WorkerConfig};
 use reelarr_stream::MediaLookup;
 use std::{path::PathBuf, sync::Arc};
@@ -67,8 +69,9 @@ pub struct AppState {
     pub nntp: SqliteNntpStore,
     /// Trust anchors for NNTP TLS test-connection.
     pub nntp_trust: NntpTrust,
-    /// Download scheduler and its NZB worker. The binary starts it before
-    /// binding; [`Supervisor::start`] runs restart recovery first.
+    /// Download scheduler and its NZB worker, importing finished downloads
+    /// into the library with [`MediaImportHandler`]. The binary starts it
+    /// before binding; [`Supervisor::start`] runs restart recovery first.
     pub downloads: Supervisor,
     /// Shared per-indexer clients for NZB fetches.
     pub indexers: IndexerClients,
@@ -117,6 +120,15 @@ impl AppState {
             downloads.worker_config(),
             downloads.scheduler.clone(),
         );
+        // Library root: the movie's existing root, else the only library
+        // root; with several roots and no default the import fails NoDefaultRoot.
+        let import = MediaImportHandler::new(
+            &db,
+            FfprobeProber::default(),
+            TitleYearMatcher::new(SqliteMovieStore::new(&db)),
+            HandlerOptions::default(),
+        );
+        supervisor.set_import_handler(Arc::new(import));
         Self {
             jobs,
             auth: Arc::new(InMemoryAuthService::default()),

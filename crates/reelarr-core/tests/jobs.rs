@@ -72,6 +72,7 @@ fn transition_matrix_covers_every_pair_and_context() {
         (ReadyForImport, Cancelled),
         (Importing, Completed),
         (Importing, Failed),
+        (Importing, ReadyForImport),
         (Importing, Cancelled),
         (Failed, Queued),
     ];

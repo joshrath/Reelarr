@@ -252,6 +252,28 @@ and never interrupts a running one. On shutdown (SIGTERM or Ctrl-C) running
 downloads stop at a checkpoint and resume on the next start. Damaged downloads
 are checked with PAR2; repair itself is not supported yet.
 
+### Import
+
+A finished download is imported into the library right away: the movie it was
+grabbed for is placed in that movie's existing library folder, else the only
+library folder (with several folders and no import default the job fails with
+`NoDefaultRoot`). The file is hardlinked when the library shares a filesystem
+with `$REELARR_DOWNLOADS_DIR`, otherwise copied; the library mount must be
+writable for this (see the `rw` notes above). Imports run one at a time beside
+downloads and do not need a Usenet provider. Downloads that were already
+waiting to import when the server stopped, or were interrupted mid-import, are
+imported after the next start.
+
+Only after a job is `Completed` are its staging files and published folder in
+`complete/` removed. A failed or cancelled import never triggers that cleanup;
+cancel removes only staging files and any unfinished publication, and waits until a running import of the job
+has finished first. An import that may succeed later (library folder offline,
+for example) keeps the job in `ReadyForImport` and tries again after 1, 5 and
+15 minutes, then every 30 minutes; the reason is sent as a job message. The
+wait restarts from the beginning after a server restart. Other failures, and
+releases that match no movie (`NoMatch`), move the job to `Failed` with that
+code.
+
 ### Job API
 
 All routes need a signed-in session (401 otherwise). `POST` and `PUT` also need

@@ -412,6 +412,79 @@ async fn missing_cleanup_is_also_best_effort_and_emits_a_message(factory: &dyn S
     assert!(found);
 }
 
+async fn attempt_import_keeps_retryable_failures_ready_and_finishes_the_rest(
+    factory: &dyn StoreFactory,
+) {
+    let retryable = ImportResult::Failed {
+        reason: "library share is offline".into(),
+        retryable: true,
+        code: Some(FailureCode::RootOffline),
+    };
+    let terminal = ImportResult::Failed {
+        reason: "a different file exists".into(),
+        retryable: false,
+        code: Some(FailureCode::DestinationConflict),
+    };
+    for result in [retryable, terminal, ImportResult::NoMatch, imported()] {
+        let dir = tempfile::tempdir().unwrap();
+        let store = factory
+            .create(EventHub::default(), Duration::from_millis(250))
+            .await;
+        let download = ready(&*store, DownloadSource::BuiltinNzb, dir.path().to_owned()).await;
+        let handler = ImportProbe::new(store.clone(), result.clone());
+        let cleanup = Arc::new(CleanupProbe::new(store.clone(), false, false));
+        let mut cleanups = CleanupRegistry::default();
+        cleanups.register(download.source.clone(), cleanup.clone());
+        let attempt = attempt_import(
+            &*store,
+            &handler,
+            &cleanups,
+            download.clone(),
+            PathMapping::Local,
+        )
+        .await
+        .unwrap();
+        match (&result, attempt) {
+            (
+                ImportResult::Failed {
+                    retryable: true, ..
+                },
+                ImportAttempt::Retry { job, failure },
+            ) => {
+                assert_eq!(job.state, JobState::ReadyForImport);
+                assert!(job.failure.is_none());
+                assert_eq!(failure.code, FailureCode::RootOffline);
+                assert!(failure.retryable);
+                assert_eq!(cleanup.calls.load(Ordering::SeqCst), 0);
+                // The next attempt claims it again.
+                let again = ImportProbe::new(store.clone(), imported());
+                let done = attempt_import(&*store, &again, &cleanups, download, PathMapping::Local)
+                    .await
+                    .unwrap();
+                assert!(
+                    matches!(done, ImportAttempt::Finished(ref j) if j.state == JobState::Completed)
+                );
+                assert_eq!(cleanup.calls.load(Ordering::SeqCst), 1);
+            }
+            (ImportResult::Failed { code, .. }, ImportAttempt::Finished(job)) => {
+                assert_eq!(job.state, JobState::Failed);
+                assert_eq!(job.failure.unwrap().code, code.unwrap());
+                assert_eq!(cleanup.calls.load(Ordering::SeqCst), 0);
+            }
+            (ImportResult::NoMatch, ImportAttempt::Finished(job)) => {
+                assert_eq!(job.state, JobState::Failed);
+                assert_eq!(job.failure.unwrap().code, FailureCode::NoMatch);
+                assert_eq!(cleanup.calls.load(Ordering::SeqCst), 0);
+            }
+            (ImportResult::Imported { .. }, ImportAttempt::Finished(job)) => {
+                assert_eq!(job.state, JobState::Completed);
+                assert_eq!(cleanup.calls.load(Ordering::SeqCst), 1);
+            }
+            (result, attempt) => panic!("{result:?} gave {attempt:?}"),
+        }
+    }
+}
+
 pub async fn run(factory: &dyn StoreFactory) {
     imported_maps_to_completed_and_cleans_once_after_completion(factory).await;
     generic_import_failure_and_no_match_have_distinct_outcomes(factory).await;
@@ -420,4 +493,5 @@ pub async fn run(factory: &dyn StoreFactory) {
     cleanup_errors_are_messages_not_import_failures_and_are_not_retried(factory).await;
     registry_selects_the_matching_source_and_concurrent_handoffs_import_once(factory).await;
     missing_cleanup_is_also_best_effort_and_emits_a_message(factory).await;
+    attempt_import_keeps_retryable_failures_ready_and_finishes_the_rest(factory).await;
 }
