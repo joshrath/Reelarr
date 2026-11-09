@@ -343,6 +343,9 @@ fn list_tree_files(src: &Path, dest: &Path) -> Result<Vec<(PathBuf, PathBuf)>, T
         if !entry.file_type().is_file() {
             continue;
         }
+        if !crate::scan::is_scannable_name(entry.path()) {
+            continue;
+        }
         let rel = match entry.path().strip_prefix(&walk_root) {
             Ok(rel) => rel,
             Err(_) => continue,
@@ -389,23 +392,29 @@ fn remove_tree_sources(
     files: &[(PathBuf, PathBuf)],
     walk_root: &Path,
 ) -> Result<(), TransferError> {
-    let mut dirs: Vec<PathBuf> = Vec::new();
     for (src_file, _) in files {
         fs::remove_file(src_file).map_err(TransferError::Source)?;
-        if let Some(parent) = src_file.parent() {
-            dirs.push(parent.to_owned());
+    }
+    // Best effort: prune empty dirs (including an empty AUDIO_TS that never
+    // held a copied file) and the walk root itself. `remove_dir` leaves a
+    // folder alone if leftover extras (a sibling cover.jpg) are still there,
+    // which is what we want for a bare VIDEO_TS download.
+    remove_empty_dirs(walk_root);
+    Ok(())
+}
+
+/// Remove `dir` and any empty directories under it, deepest first. Non-empty
+/// folders are left alone.
+fn remove_empty_dirs(dir: &Path) {
+    if let Ok(entries) = fs::read_dir(dir) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if entry.file_type().is_ok_and(|ft| ft.is_dir()) {
+                remove_empty_dirs(&path);
+            }
         }
     }
-    dirs.sort_by_key(|p| std::cmp::Reverse(p.components().count()));
-    dirs.dedup();
-    for dir in dirs {
-        let _ = fs::remove_dir(dir);
-    }
-    // Best effort: drop the walk root itself once every copied file is gone.
-    // `remove_dir` leaves it alone if leftover extras (a sibling cover.jpg)
-    // are still there, which is what we want for a bare VIDEO_TS download.
-    let _ = fs::remove_dir(walk_root);
-    Ok(())
+    let _ = fs::remove_dir(dir);
 }
 
 pub(crate) fn partial_path(dest: &Path) -> PathBuf {
@@ -546,6 +555,50 @@ mod tests {
         )
         .unwrap();
         assert!(dest_tree_complete(&dest, 15).unwrap());
+    }
+
+    #[test]
+    fn tree_skips_hidden_and_partial_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let src = bluray_tree(dir.path());
+        fs::write(src.join("BDMV/.DS_Store"), b"dsstore!!").unwrap();
+        fs::write(
+            src.join(format!("BDMV/STREAM/00001.m2ts{PARTIAL_SUFFIX}")),
+            b"stale",
+        )
+        .unwrap();
+        assert_eq!(tree_payload_size(&src).unwrap(), 15);
+        let dest = dir.path().join("library/Movie (2010)");
+        assert_eq!(
+            transfer_tree(&src, &dest, TransferMode::Copy).unwrap(),
+            Transferred::Copied
+        );
+        assert!(!dest.join("BDMV/.DS_Store").exists());
+        assert!(
+            !dest
+                .join(format!("BDMV/STREAM/00001.m2ts{PARTIAL_SUFFIX}"))
+                .exists()
+        );
+        assert!(dest_tree_complete(&dest, 15).unwrap());
+    }
+
+    #[test]
+    fn tree_move_removes_empty_audio_ts() {
+        let dir = tempfile::tempdir().unwrap();
+        let src = dir.path().join("Movie.2010.DVD");
+        fs::create_dir_all(src.join("VIDEO_TS")).unwrap();
+        fs::write(src.join("VIDEO_TS/VIDEO_TS.IFO"), b"ifo").unwrap();
+        fs::create_dir_all(src.join("AUDIO_TS")).unwrap();
+        let dest = dir.path().join("library/Movie (2010)");
+        assert_eq!(
+            transfer_tree(&src, &dest, TransferMode::Move).unwrap(),
+            Transferred::Moved
+        );
+        assert!(dest_tree_complete(&dest, 3).unwrap());
+        assert!(
+            !src.exists(),
+            "empty AUDIO_TS pruned so the walk root is removed"
+        );
     }
 
     #[test]

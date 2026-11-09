@@ -473,8 +473,9 @@ impl Drop for RunGuard<'_> {
 }
 
 /// Whether a file name is one the scanner may consider at all: not hidden
-/// and not a partial import.
-fn is_scannable_name(path: &Path) -> bool {
+/// and not a partial import. Tree import uses the same filter so ledger
+/// `size_bytes` and [`crate::scan::disc::folder_size`] stay aligned.
+pub(crate) fn is_scannable_name(path: &Path) -> bool {
     let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
     !(name.starts_with('.') || name.ends_with(PARTIAL_SUFFIX))
 }
