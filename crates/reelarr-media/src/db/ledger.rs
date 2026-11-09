@@ -33,6 +33,10 @@ pub struct LedgerEntry {
 }
 
 /// The `import_ledger` table.
+///
+/// `job_id` is not a foreign key to `jobs`, so a jobs-table rebuild cannot
+/// cascade-delete a pending import. A later pass should delete orphans:
+/// `DELETE FROM import_ledger WHERE job_id NOT IN (SELECT id FROM jobs)`.
 #[derive(Debug, Clone)]
 pub struct SqliteImportLedger {
     db: Database,
@@ -136,6 +140,17 @@ impl SqliteImportLedger {
         .execute(self.db.pool())
         .await
         .map_err(backend)?;
+        Ok(())
+    }
+
+    /// Drops a job's plan, used when the destination turned out to be
+    /// someone else's file so a retry does not adopt it.
+    pub async fn delete(&self, job_id: &str) -> Result<(), StoreError> {
+        sqlx::query("DELETE FROM import_ledger WHERE job_id = ?")
+            .bind(job_id)
+            .execute(self.db.pool())
+            .await
+            .map_err(backend)?;
         Ok(())
     }
 }

@@ -2558,6 +2558,7 @@ version = "0.0.1"
 dependencies = [
  "async-trait",
  "futures-util",
+ "libc",
  "reelarr-core",
  "reelarr-db",
  "reelarr-stream",
