@@ -6,7 +6,7 @@ use std::path::PathBuf;
 use std::pin::Pin;
 use std::sync::Mutex;
 
-use reelarr_types::{MediaFileId, MediaProbe};
+use reelarr_types::{MediaFileId, MediaKind, MediaProbe};
 
 /// A file that can be streamed.
 #[derive(Debug, Clone, PartialEq)]
@@ -16,6 +16,8 @@ pub struct PlayableFile {
     /// The library root the file belongs to; the file must resolve inside it.
     pub root: PathBuf,
     pub probe: Option<MediaProbe>,
+    /// Disc rips are listed but not playable yet.
+    pub kind: MediaKind,
 }
 
 #[derive(Debug, thiserror::Error)]

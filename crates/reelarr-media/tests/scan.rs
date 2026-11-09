@@ -6,11 +6,11 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
 use reelarr_media::scan::{
-    FfprobeProber, InMemoryMediaFileStore, MediaFileStore, ProbeError, Prober, ScanError,
-    ScanOptions, Scanner, parse_ffprobe_json, run_periodic,
+    FfprobeProber, InMemoryMediaFileStore, MediaFileStore, NewMediaFile, ProbeError, Prober,
+    ScanError, ScanOptions, Scanner, parse_ffprobe_json, run_periodic,
 };
 use reelarr_types::{
-    LibraryRoot, LibraryRootId, LibraryRootKind, MediaFileStatus, MediaProbe, StreamKind,
+    LibraryRoot, LibraryRootId, LibraryRootKind, MediaFileStatus, MediaKind, MediaProbe, StreamKind,
 };
 
 #[derive(Default)]
@@ -289,4 +289,109 @@ async fn ffprobe_prober_reads_a_generated_clip() {
         missing.probe(&clip).await,
         Err(ProbeError::Spawn { .. })
     ));
+}
+
+fn iso_bytes() -> Vec<u8> {
+    let mut data = vec![0u8; 18 * 2048];
+    data[16 * 2048] = 1;
+    data[16 * 2048 + 1..16 * 2048 + 6].copy_from_slice(b"CD001");
+    data
+}
+
+/// Regression: segments inside a Blu-ray structure (`BDMV/STREAM/*.m2ts`)
+/// were each added as a separate movie.
+#[tokio::test]
+async fn bluray_folder_is_one_entry_not_many_m2ts_files() {
+    let dir = tempfile::tempdir().unwrap();
+    write(dir.path(), "Movie (2010)/BDMV/index.bdmv", b"x");
+    write(dir.path(), "Movie (2010)/BDMV/STREAM/00000.m2ts", b"aaaa");
+    write(dir.path(), "Movie (2010)/BDMV/STREAM/00001.m2ts", b"bbbbbb");
+    write(dir.path(), "Movie (2010)/CERTIFICATE/id.bdmv", b"c");
+    write(dir.path(), "Old (1999)/VIDEO_TS/VIDEO_TS.IFO", b"i");
+    write(dir.path(), "Old (1999)/VIDEO_TS/VTS_01_1.VOB", b"vvvv");
+    // A stray structure folder without a recognizable disc is skipped too.
+    write(dir.path(), "Broken/BDMV/BACKUP/00009.m2ts", b"z");
+
+    let s = scanner();
+    let report = s.scan_root(&root(dir.path())).await.unwrap();
+    assert_eq!(report.added, 2);
+    assert_eq!(
+        s.prober().calls.load(Ordering::SeqCst),
+        0,
+        "discs are never probed"
+    );
+    let mut files = s.store().list_by_root(LibraryRootId(1)).await.unwrap();
+    files.sort_by(|a, b| a.path.cmp(&b.path));
+    assert!(files[0].path.ends_with("Movie (2010)"));
+    assert_eq!(files[0].kind, MediaKind::DiscFolder);
+    assert_eq!(files[0].size_bytes, 1 + 4 + 6 + 1);
+    assert!(files[1].path.ends_with("Old (1999)"));
+    assert_eq!(files[1].kind, MediaKind::DiscFolder);
+    assert!(files.iter().all(|f| f.probe.is_none()));
+
+    // Unchanged discs are left alone on rescan.
+    let report = s.scan_root(&root(dir.path())).await.unwrap();
+    assert_eq!((report.added, report.updated), (0, 0));
+}
+
+#[tokio::test]
+async fn iso_images_are_classified_by_signature() {
+    let dir = tempfile::tempdir().unwrap();
+    write(dir.path(), "Movie (2010)/Movie.iso", &iso_bytes());
+    write(dir.path(), "Junk/notadisc.ISO", b"definitely not iso9660");
+    write(dir.path(), "Other.mkv", b"m");
+
+    let s = scanner();
+    let report = s.scan_root(&root(dir.path())).await.unwrap();
+    assert_eq!(report.added, 3);
+    assert_eq!(s.prober().calls.load(Ordering::SeqCst), 1);
+    let files = s.store().list_by_root(LibraryRootId(1)).await.unwrap();
+    let kind = |suffix: &str| {
+        files
+            .iter()
+            .find(|f| f.path.ends_with(suffix))
+            .unwrap()
+            .kind
+    };
+    assert_eq!(kind("Movie.iso"), MediaKind::DiscImage);
+    assert_eq!(kind("notadisc.ISO"), MediaKind::UnrecognizedImage);
+    assert_eq!(kind("Other.mkv"), MediaKind::File);
+}
+
+#[tokio::test]
+async fn disc_folder_over_limits_keeps_its_entry() {
+    let dir = tempfile::tempdir().unwrap();
+    write(dir.path(), "Movie/VIDEO_TS/VIDEO_TS.IFO", b"i");
+    write(dir.path(), "Movie/VIDEO_TS/VTS_01_1.VOB", b"v");
+    write(dir.path(), "Other.mkv", b"m");
+
+    // Limits so tight the folder can't be summed, as on a hung share. The
+    // known entry must stay present rather than be marked missing.
+    let store = InMemoryMediaFileStore::new();
+    store
+        .insert(NewMediaFile {
+            movie_id: None,
+            root_id: LibraryRootId(1),
+            path: dir.path().join("Movie").to_string_lossy().into_owned(),
+            size_bytes: 2,
+            modified_at: 0,
+            probe: None,
+            kind: MediaKind::DiscFolder,
+        })
+        .await
+        .unwrap();
+    let s = Scanner::new(
+        FakeProber::default(),
+        store,
+        ScanOptions {
+            disc_max_entries: 1,
+            ..ScanOptions::default()
+        },
+    );
+    let report = s.scan_root(&root(dir.path())).await.unwrap();
+    assert_eq!(report.marked_missing, 0);
+    assert_eq!(report.added, 1);
+    assert!(report.walk_errors.iter().any(|e| e.contains("entries")));
+    let files = s.store().list_by_root(LibraryRootId(1)).await.unwrap();
+    assert!(files.iter().all(|f| f.status == MediaFileStatus::Present));
 }

@@ -5,8 +5,9 @@
 //! together ([`service`]), plus library scanning with ffprobe ([`scan`]).
 //! Completed downloads are imported into the library by [`import`]. SQLite
 //! stores and the playback lookup are in [`db`]; library root health checks
-//! are in [`health`].
+//! are in [`health`]. Existing libraries are linked in place by [`adopt`].
 
+pub mod adopt;
 pub mod db;
 pub mod health;
 pub mod import;

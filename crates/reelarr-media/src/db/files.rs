@@ -1,5 +1,7 @@
 use reelarr_db::Database;
-use reelarr_types::{LibraryRootId, MediaFile, MediaFileId, MediaFileStatus, MediaProbe, MovieId};
+use reelarr_types::{
+    LibraryRootId, MediaFile, MediaFileId, MediaFileStatus, MediaKind, MediaProbe, MovieId,
+};
 use sqlx::Row;
 use sqlx::sqlite::SqliteRow;
 
@@ -7,7 +9,8 @@ use super::{backend, to_i64, to_u64};
 use crate::scan::{MediaFileStore, NewMediaFile};
 use crate::store::StoreError;
 
-const COLUMNS: &str = "id, movie_id, root_id, path, size_bytes, modified_at, missing_since, probe";
+const COLUMNS: &str =
+    "id, movie_id, root_id, path, size_bytes, modified_at, missing_since, probe, kind";
 
 /// [`MediaFileStore`] backed by the `media_files` table. A file's
 /// [`MediaFileStatus::Missing`] is stored as `missing_since`, and its probe
@@ -44,6 +47,11 @@ fn missing_since(status: &MediaFileStatus) -> Option<i64> {
     }
 }
 
+pub(crate) fn kind_from_row(row: &SqliteRow) -> Result<MediaKind, StoreError> {
+    let kind: String = row.try_get("kind").map_err(backend)?;
+    MediaKind::parse(&kind).ok_or_else(|| StoreError::Backend(format!("unknown media kind {kind}")))
+}
+
 fn row_to_file(row: &SqliteRow) -> Result<MediaFile, StoreError> {
     let missing: Option<i64> = row.try_get("missing_since").map_err(backend)?;
     let movie_id: Option<i64> = row.try_get("movie_id").map_err(backend)?;
@@ -59,14 +67,15 @@ fn row_to_file(row: &SqliteRow) -> Result<MediaFile, StoreError> {
             Some(since) => MediaFileStatus::Missing { since },
         },
         probe: probe_from_json(row.try_get("probe").map_err(backend)?)?,
+        kind: kind_from_row(row)?,
     })
 }
 
 impl MediaFileStore for SqliteMediaFileStore {
     async fn insert(&self, file: NewMediaFile) -> Result<MediaFile, StoreError> {
         let done = sqlx::query(
-            "INSERT INTO media_files (movie_id, root_id, path, size_bytes, modified_at, probe) \
-             VALUES (?, ?, ?, ?, ?, ?)",
+            "INSERT INTO media_files (movie_id, root_id, path, size_bytes, modified_at, probe, kind) \
+             VALUES (?, ?, ?, ?, ?, ?, ?)",
         )
         .bind(file.movie_id.map(|m| m.0))
         .bind(file.root_id.0)
@@ -74,6 +83,7 @@ impl MediaFileStore for SqliteMediaFileStore {
         .bind(to_i64(file.size_bytes, "size_bytes")?)
         .bind(file.modified_at)
         .bind(probe_to_json(&file.probe)?)
+        .bind(file.kind.as_str())
         .execute(self.db.pool())
         .await
         .map_err(|e| match &e {
@@ -91,13 +101,14 @@ impl MediaFileStore for SqliteMediaFileStore {
             modified_at: file.modified_at,
             status: MediaFileStatus::Present,
             probe: file.probe,
+            kind: file.kind,
         })
     }
 
     async fn update(&self, file: &MediaFile) -> Result<(), StoreError> {
         let done = sqlx::query(
             "UPDATE media_files SET movie_id = ?, root_id = ?, path = ?, size_bytes = ?, \
-             modified_at = ?, missing_since = ?, probe = ? WHERE id = ?",
+             modified_at = ?, missing_since = ?, probe = ?, kind = ? WHERE id = ?",
         )
         .bind(file.movie_id.map(|m| m.0))
         .bind(file.root_id.0)
@@ -106,6 +117,7 @@ impl MediaFileStore for SqliteMediaFileStore {
         .bind(file.modified_at)
         .bind(missing_since(&file.status))
         .bind(probe_to_json(&file.probe)?)
+        .bind(file.kind.as_str())
         .bind(file.id.0)
         .execute(self.db.pool())
         .await

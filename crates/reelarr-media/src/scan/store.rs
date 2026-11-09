@@ -5,7 +5,9 @@ use std::collections::BTreeMap;
 use std::future::Future;
 use std::sync::{Arc, Mutex};
 
-use reelarr_types::{LibraryRootId, MediaFile, MediaFileId, MediaFileStatus, MediaProbe, MovieId};
+use reelarr_types::{
+    LibraryRootId, MediaFile, MediaFileId, MediaFileStatus, MediaKind, MediaProbe, MovieId,
+};
 
 use crate::store::StoreError;
 
@@ -18,6 +20,7 @@ pub struct NewMediaFile {
     pub size_bytes: u64,
     pub modified_at: i64,
     pub probe: Option<MediaProbe>,
+    pub kind: MediaKind,
 }
 
 /// Persistence for scanned media files.
@@ -88,6 +91,7 @@ impl MediaFileStore for InMemoryMediaFileStore {
             modified_at: file.modified_at,
             status: MediaFileStatus::Present,
             probe: file.probe,
+            kind: file.kind,
         };
         guard.1.insert(stored.id, stored.clone());
         Ok(stored)

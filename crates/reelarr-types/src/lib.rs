@@ -9,9 +9,9 @@ pub use job::{JobEvent, JobEventKind, JobState, Progress};
 
 pub use movie::{
     Artwork, DEFAULT_RESCAN_INTERVAL_SECS, ExternalIds, LibraryRoot, LibraryRootId,
-    LibraryRootInfo, LibraryRootKind, MediaFile, MediaFileId, MediaFileStatus, MediaProbe,
-    MediaStream, Movie, MovieId, MovieMetadata, MovieSearchResult, NewLibraryRoot, RootHealth,
-    StreamKind,
+    LibraryRootInfo, LibraryRootKind, MediaFile, MediaFileId, MediaFileStatus, MediaKind,
+    MediaProbe, MediaStream, Movie, MovieId, MovieMetadata, MovieSearchResult, NewLibraryRoot,
+    RootHealth, StreamKind,
 };
 pub use playback::{PlaybackInfo, PlaybackMethod, UnsupportedKind, UnsupportedReason};
 
