@@ -2720,7 +2720,9 @@ dependencies = [
 name = "reelarr-server"
 version = "0.0.1"
 dependencies = [
+ "async-trait",
  "axum",
+ "crc32fast",
  "http-body-util",
  "leptos",
  "rcgen",
@@ -2737,6 +2739,7 @@ dependencies = [
  "sqlx",
  "subtle",
  "tempfile",
+ "thiserror 2.0.21",
  "tokio",
  "tokio-rustls",
  "tower",

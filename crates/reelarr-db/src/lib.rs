@@ -25,6 +25,9 @@ pub use nzbs::SqliteNzbStore;
 mod nntp;
 pub use nntp::{NntpServer, NntpSettingsError, SqliteNntpStore};
 
+mod recovery;
+pub use recovery::SqliteRecoveryPaths;
+
 mod settings;
 pub use settings::SqliteSettingsStore;
 

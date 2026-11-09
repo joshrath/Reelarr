@@ -10,13 +10,12 @@
 //! is write-only: responses carry `has_password` only. Error messages are
 //! static and never echo credentials, and nothing here logs request bodies.
 //!
-//! **Pool replacement policy** (for the worker wiring in a later PR). Saved
-//! settings take effect only for work that starts after the change: the
-//! scheduler builds a new `Pool` from [`reelarr_db::SqliteNntpStore::load`],
-//! new jobs drain onto that pool, and jobs already downloading finish on the
-//! pool they started with, which is shut down once idle. Running downloads
-//! are never pre-empted. No pool exists in this PR, so there is nothing to
-//! swap yet; saving only persists.
+//! **Pool replacement policy.** Saved settings take effect only for work that
+//! starts after the change: save and delete notify the download supervisor
+//! ([`crate::downloads`]), which builds a new `Pool` from
+//! [`reelarr_db::SqliteNntpStore::load`]. New jobs go to that pool, and jobs
+//! already downloading finish on the pool they started with, which is shut
+//! down once idle. Running downloads are never pre-empted.
 use crate::state::{AppState, NntpTrust};
 use axum::{
     Json, Router,
@@ -105,12 +104,14 @@ async fn save(
 ) -> Result<Json<NntpServerSettings>, NntpApiError> {
     let saved = state.nntp.save(&body(update)?).await?;
     tracing::info!("NNTP settings saved");
+    state.downloads.nntp_settings_changed();
     Ok(Json(saved))
 }
 
 async fn remove(State(state): State<AppState>) -> Result<StatusCode, NntpApiError> {
     state.nntp.clear().await?;
     tracing::info!("NNTP settings removed");
+    state.downloads.nntp_settings_changed();
     Ok(StatusCode::NO_CONTENT)
 }
 
