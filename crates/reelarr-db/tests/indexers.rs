@@ -224,7 +224,13 @@ async fn persists_on_reopen_and_no_plaintext_in_database_or_wal() {
 }
 fn assert_files_have_no_secret(dir: &std::path::Path) {
     for file in std::fs::read_dir(dir).unwrap() {
-        let bytes = std::fs::read(file.unwrap().path()).unwrap();
+        // SQLite may delete a transient -wal/-shm/-journal file between the
+        // directory listing and the read; a vanished file holds no secret.
+        let bytes = match std::fs::read(file.unwrap().path()) {
+            Ok(bytes) => bytes,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(e) => panic!("read database file: {e}"),
+        };
         assert!(
             !bytes
                 .windows(API_KEY.len())

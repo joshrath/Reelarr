@@ -82,8 +82,9 @@ array. Migration 0007 creates the indexer table.
 
 The default `secrets::XChaChaSecretCipher` encrypts API keys, with a versioned
 ciphertext, per-write nonce and record/field-bound associated data. No API keys
-are serialized into the settings. Inject a different `SecretCipher` to change
-policy; the default is pending Josh's decision. The store does not itself load
+are serialized into the settings. Encrypting indexer API keys and NNTP passwords
+with XChaCha20-Poly1305 is the decided policy; `SecretCipher` stays an internal
+abstraction. The API never returns secrets and logs never show them. The store does not itself load
 keys or change server startup: callers initialize the cipher once at startup.
 See [deployment](../../docs/deployment.md#indexer-secret-storage-store-integration-70)
 for environment/key-file configuration and backup/recovery implications.

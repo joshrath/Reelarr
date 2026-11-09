@@ -157,10 +157,11 @@ unavailable-item behavior remain tracked in #59.
 
 ## Indexer secret storage (store integration, #70)
 
-`reelarr-db` now supplies `SqliteIndexerStore` and a swappable `SecretCipher`.
-This PR does **not** wire indexer CRUD or secret initialization into the server;
-that belongs to the #76 integration. The default policy below is pending Josh's
-final decision, and the cipher is injected so it can be changed before merge.
+`reelarr-db` now supplies `SqliteIndexerStore`, with secrets encrypted behind an
+internal `SecretCipher` abstraction. It does **not** wire indexer CRUD or secret
+initialization into the server; that belongs to the #76 integration. The policy
+below is decided: indexer API keys and NNTP passwords are encrypted at rest, the
+API never returns them and logs never show them.
 
 The default cipher encrypts each API key with RustCrypto XChaCha20-Poly1305 and
 an independently generated 24-byte OS-random nonce. Ciphertext is versioned and

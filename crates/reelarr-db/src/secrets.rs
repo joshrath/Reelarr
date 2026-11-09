@@ -1,4 +1,4 @@
-//! Swappable secret-at-rest policy. Initialization performs blocking filesystem I/O;
+//! Secret-at-rest encryption (XChaCha20-Poly1305) behind an internal `SecretCipher` trait. Initialization performs blocking filesystem I/O;
 //! call it during startup, not for each request. No errors retain external values.
 use std::{fmt, path::Path};
 
@@ -34,8 +34,8 @@ pub enum SecretError {
 }
 
 /// Internal storage integration only. `context` binds a value to its record/field.
-/// Implementations must not log/retain plaintext in diagnostics. The default can be
-/// replaced without changing IndexerStore or its callers (policy pending approval).
+/// Implementations must not log/retain plaintext in diagnostics. XChaCha20-Poly1305
+/// is the decided default; the trait keeps IndexerStore independent of key handling.
 pub trait SecretCipher: Send + Sync {
     fn encrypt(&self, context: &[u8], secret: &str) -> Result<Vec<u8>, SecretError>;
     fn decrypt(&self, context: &[u8], ciphertext: &[u8]) -> Result<SecretString, SecretError>;
