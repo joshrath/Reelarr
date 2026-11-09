@@ -764,3 +764,90 @@ async fn tls_body_feeds_yenc_with_exactly_one_dot_unstuff() {
     assert_eq!(output, decoded);
     mock.assert_healthy();
 }
+
+#[tokio::test]
+async fn probe_authenticates_fetches_no_article_and_quits() {
+    let mock = Mock::start(Options::default()).await;
+    let mut config = mock.config();
+    config.credentials = Some(credentials());
+    let pool = mock.pool(config);
+    pool.probe().await.unwrap();
+    // A second probe opens a fresh socket: probe connections are never pooled.
+    pool.probe().await.unwrap();
+    assert_eq!(mock.stats.accepted.load(Ordering::SeqCst), 2);
+    assert_eq!(mock.stats.users.load(Ordering::SeqCst), 2);
+    assert_eq!(mock.stats.passwords.load(Ordering::SeqCst), 2);
+    assert_eq!(mock.stats.bodies.load(Ordering::SeqCst), 0);
+    assert_eq!(mock.stats.quits.load(Ordering::SeqCst), 2);
+    // users + passwords + quits only: no BODY/STAT/GROUP.
+    assert_eq!(mock.stats.commands.load(Ordering::SeqCst), 6);
+    mock.assert_healthy();
+}
+
+#[tokio::test]
+async fn probe_reports_auth_failure_without_credentials_in_diagnostics() {
+    let mock = Mock::start(Options {
+        pass_code: 481,
+        ..Options::default()
+    })
+    .await;
+    let mut config = mock.config();
+    config.credentials = Some(credentials());
+    config.retry.max_retries = 3;
+    let error = mock.pool(config).probe().await.unwrap_err();
+    assert!(matches!(error, Error::Authentication { code: 481 }));
+    for text in [format!("{error}"), format!("{error:?}")] {
+        assert!(!text.contains(USER) && !text.contains(PASS));
+    }
+    assert_eq!(
+        mock.stats.accepted.load(Ordering::SeqCst),
+        1,
+        "never retried"
+    );
+    assert_eq!(mock.stats.bodies.load(Ordering::SeqCst), 0);
+    mock.assert_healthy();
+}
+
+#[tokio::test]
+async fn probe_rejects_untrusted_certificate_before_credentials() {
+    let trusted = Mock::start(Options::default()).await;
+    let untrusted = Mock::start(Options::default()).await;
+    let mut config = untrusted.config();
+    config.credentials = Some(credentials());
+    let pool = Pool::with_root_certificates(config, trusted.roots.clone()).unwrap();
+    assert!(matches!(pool.probe().await, Err(Error::Tls)));
+    assert_eq!(untrusted.stats.commands.load(Ordering::SeqCst), 0);
+    untrusted.assert_healthy();
+}
+
+#[tokio::test]
+async fn probe_is_bounded_by_connect_timeout_in_total() {
+    // Each greeting line arrives within the io budget's reach, but the whole
+    // exchange must still finish inside the connect timeout.
+    let mock = Mock::start(Options {
+        greeting_delay: Duration::from_millis(400),
+        ..Options::default()
+    })
+    .await;
+    let mut config = mock.config();
+    config.credentials = Some(credentials());
+    config.timeouts.connect = Duration::from_millis(150);
+    config.timeouts.io = Duration::from_secs(2);
+    let started = Instant::now();
+    assert!(matches!(
+        mock.pool(config).probe().await,
+        Err(Error::Timeout(_))
+    ));
+    assert!(started.elapsed() < Duration::from_secs(1));
+    assert_eq!(mock.stats.users.load(Ordering::SeqCst), 0);
+    mock.assert_healthy();
+}
+
+#[tokio::test]
+async fn probe_after_shutdown_is_closed() {
+    let mock = Mock::start(Options::default()).await;
+    let pool = mock.pool(mock.config());
+    pool.shutdown().await;
+    assert!(matches!(pool.probe().await, Err(Error::Closed)));
+    assert_eq!(mock.stats.accepted.load(Ordering::SeqCst), 0);
+}

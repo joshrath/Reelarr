@@ -89,6 +89,38 @@ impl Pool {
             .await
             .map(|_| ())
     }
+    /// Settings check: open a **fresh** connection and complete TCP, verified
+    /// TLS, the greeting and AUTHINFO (when credentials are configured), then
+    /// send a best-effort QUIT. No article is requested and no group selected.
+    ///
+    /// The whole exchange, including waiting for a pool slot, is bounded by
+    /// `timeouts.connect` (reported as [`Error::Timeout`]). The probe socket is
+    /// never added to the idle set, and it counts against `max_connections`
+    /// while open. The trailing QUIT is bounded by `timeouts.io` and its
+    /// outcome is ignored. Errors are the same secret-free classifications as
+    /// [`Pool::body`]; nothing here is retried.
+    pub async fn probe(&self) -> Result<(), Error> {
+        let config = &self.inner.config;
+        let (permit, connection) = deadline(config.timeouts.connect, "probe", async {
+            let permit = self
+                .inner
+                .slots
+                .clone()
+                .acquire_owned()
+                .await
+                .map_err(|_| Error::Closed)?;
+            if self.inner.closed.load(Ordering::Acquire) {
+                return Err(Error::Closed);
+            }
+            let connection = Connection::connect(config.clone(), self.inner.tls.clone()).await?;
+            Ok((permit, connection))
+        })
+        .await?;
+        let _ = tokio::time::timeout(config.timeouts.io, connection.quit()).await;
+        drop(permit);
+        tracing::debug!(target: "reelarr_nzb::nntp", "NNTP probe succeeded");
+        Ok(())
+    }
     async fn acquire(&self) -> Result<Lease, Error> {
         let permit = deadline(self.inner.config.timeouts.acquire, "acquire", async {
             self.inner

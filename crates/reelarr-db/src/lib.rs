@@ -22,6 +22,9 @@ pub use jobs::SqliteJobStore;
 mod nzbs;
 pub use nzbs::SqliteNzbStore;
 
+mod nntp;
+pub use nntp::{NntpServer, NntpSettingsError, SqliteNntpStore};
+
 mod settings;
 pub use settings::SqliteSettingsStore;
 

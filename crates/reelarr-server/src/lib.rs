@@ -2,6 +2,7 @@
 pub mod api;
 pub mod auth;
 pub mod library;
+pub mod nntp;
 pub mod state;
 pub mod stream;
 
