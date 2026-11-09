@@ -194,3 +194,52 @@ mod tests {
         assert_eq!(back, movie);
     }
 }
+
+/// Whether a library root can be reached. An offline root's files are kept
+/// and shown as unavailable; they are never treated as deleted.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(tag = "state", rename_all = "snake_case")]
+pub enum RootHealth {
+    /// Not checked yet.
+    #[default]
+    Unknown,
+    Online,
+    /// Unreachable: missing, unmounted, a stale NFS handle, a timeout, etc.
+    Offline {
+        since: i64,
+        reason: String,
+    },
+    /// Reachable but Reelarr may not read it.
+    PermissionDenied {
+        reason: String,
+    },
+}
+
+impl RootHealth {
+    /// Whether files under the root can be served and scanned.
+    pub fn is_available(&self) -> bool {
+        matches!(self, RootHealth::Unknown | RootHealth::Online)
+    }
+}
+
+/// A library root with its latest health check, as shown in settings.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LibraryRootInfo {
+    #[serde(flatten)]
+    pub root: LibraryRoot,
+    pub health: RootHealth,
+    /// Unix seconds of the last health check.
+    pub health_checked_at: Option<i64>,
+    /// Files recorded under this root, in any status.
+    pub file_count: u64,
+}
+
+/// Body of `POST /api/v1/library/roots`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct NewLibraryRoot {
+    pub path: String,
+    pub kind: LibraryRootKind,
+    /// Defaults to [`DEFAULT_RESCAN_INTERVAL_SECS`] when omitted.
+    #[serde(default)]
+    pub rescan_interval_secs: Option<u64>,
+}

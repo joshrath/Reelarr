@@ -1,5 +1,5 @@
-//! Media file storage abstraction. The SQLite implementation lives in
-//! `reelarr-db`; this crate only has an in-memory one for tests.
+//! Media file storage abstraction. The SQLite implementation is
+//! [`crate::db::SqliteMediaFileStore`]; the in-memory one is for tests.
 
 use std::collections::BTreeMap;
 use std::future::Future;
