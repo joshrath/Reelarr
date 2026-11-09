@@ -11,7 +11,8 @@ reelarr-core = { version = "0.0.1", path = "../reelarr-core" }
 async-trait = { workspace = true }
 thiserror = { workspace = true }
 sqlx = { workspace = true }
+tokio = { workspace = true }
 
 [dev-dependencies]
+reelarr-types = { path = "../reelarr-types" }
 tempfile = { workspace = true }
-tokio = { workspace = true }

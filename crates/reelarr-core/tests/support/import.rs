@@ -6,19 +6,21 @@ use std::{
     },
 };
 
+use super::job_store::StoreFactory;
 use async_trait::async_trait;
 use reelarr_core::*;
 use reelarr_types::{MediaFileId, MovieId};
+use std::time::Duration;
 use tokio::sync::Mutex;
 
 struct ImportProbe {
-    store: Arc<InMemoryJobStore>,
+    store: Arc<dyn JobStore>,
     result: ImportResult,
     requests: Mutex<Vec<CompletedDownload>>,
 }
 
 impl ImportProbe {
-    fn new(store: Arc<InMemoryJobStore>, result: ImportResult) -> Self {
+    fn new(store: Arc<dyn JobStore>, result: ImportResult) -> Self {
         Self {
             store,
             result,
@@ -43,14 +45,14 @@ impl ImportHandler for ImportProbe {
 }
 
 struct CleanupProbe {
-    store: Arc<InMemoryJobStore>,
+    store: Arc<dyn JobStore>,
     calls: AtomicUsize,
     fail: bool,
     remove_directory: bool,
 }
 
 impl CleanupProbe {
-    fn new(store: Arc<InMemoryJobStore>, fail: bool, remove_directory: bool) -> Self {
+    fn new(store: Arc<dyn JobStore>, fail: bool, remove_directory: bool) -> Self {
         Self {
             store,
             calls: AtomicUsize::new(0),
@@ -119,8 +121,7 @@ fn imported() -> ImportResult {
     }
 }
 
-#[tokio::test]
-async fn imported_maps_to_completed_and_cleans_once_after_completion() {
+async fn imported_maps_to_completed_and_cleans_once_after_completion(factory: &dyn StoreFactory) {
     let dir = tempfile::tempdir().unwrap();
     let output = dir.path().join("output");
     tokio::fs::create_dir_all(output.join("already-empty-subfolder"))
@@ -129,7 +130,9 @@ async fn imported_maps_to_completed_and_cleans_once_after_completion() {
     tokio::fs::write(output.join("leftover.txt"), "partial folder")
         .await
         .unwrap();
-    let store = Arc::new(InMemoryJobStore::default());
+    let store = factory
+        .create(EventHub::default(), Duration::from_millis(250))
+        .await;
     let download = ready(&*store, DownloadSource::BuiltinNzb, output.clone()).await;
     let handler = ImportProbe::new(store.clone(), imported());
     let cleanup = Arc::new(CleanupProbe::new(store.clone(), false, true));
@@ -170,8 +173,7 @@ async fn imported_maps_to_completed_and_cleans_once_after_completion() {
     assert!(!output.exists());
 }
 
-#[tokio::test]
-async fn generic_import_failure_and_no_match_have_distinct_outcomes() {
+async fn generic_import_failure_and_no_match_have_distinct_outcomes(factory: &dyn StoreFactory) {
     for result in [
         ImportResult::Failed {
             reason: "collision".into(),
@@ -180,7 +182,9 @@ async fn generic_import_failure_and_no_match_have_distinct_outcomes() {
         ImportResult::NoMatch,
     ] {
         let dir = tempfile::tempdir().unwrap();
-        let store = Arc::new(InMemoryJobStore::default());
+        let store = factory
+            .create(EventHub::default(), Duration::from_millis(250))
+            .await;
         let mut download = ready(
             &*store,
             DownloadSource::External {
@@ -243,13 +247,14 @@ async fn generic_import_failure_and_no_match_have_distinct_outcomes() {
     }
 }
 
-#[tokio::test]
-async fn unmapped_or_relative_paths_fail_before_import_or_cleanup() {
+async fn unmapped_or_relative_paths_fail_before_import_or_cleanup(factory: &dyn StoreFactory) {
     for (path, mapping) in [
         (PathBuf::from("/remote/output"), PathMapping::Unmapped),
         (PathBuf::from("relative/output"), PathMapping::Local),
     ] {
-        let store = Arc::new(InMemoryJobStore::default());
+        let store = factory
+            .create(EventHub::default(), Duration::from_millis(250))
+            .await;
         let download = ready(&*store, DownloadSource::BuiltinNzb, path).await;
         let handler = ImportProbe::new(store.clone(), imported());
         let cleanup = Arc::new(CleanupProbe::new(store.clone(), false, false));
@@ -265,9 +270,10 @@ async fn unmapped_or_relative_paths_fail_before_import_or_cleanup() {
     }
 }
 
-#[tokio::test]
-async fn builtin_jobs_require_the_original_movie_id() {
-    let store = Arc::new(InMemoryJobStore::default());
+async fn builtin_jobs_require_the_original_movie_id(factory: &dyn StoreFactory) {
+    let store = factory
+        .create(EventHub::default(), Duration::from_millis(250))
+        .await;
     let mut download = ready(
         &*store,
         DownloadSource::BuiltinNzb,
@@ -290,9 +296,12 @@ async fn builtin_jobs_require_the_original_movie_id() {
     assert!(handler.requests.lock().await.is_empty());
 }
 
-#[tokio::test]
-async fn cleanup_errors_are_messages_not_import_failures_and_are_not_retried() {
-    let store = Arc::new(InMemoryJobStore::default());
+async fn cleanup_errors_are_messages_not_import_failures_and_are_not_retried(
+    factory: &dyn StoreFactory,
+) {
+    let store = factory
+        .create(EventHub::default(), Duration::from_millis(250))
+        .await;
     let download = ready(
         &*store,
         DownloadSource::BuiltinNzb,
@@ -329,9 +338,12 @@ async fn cleanup_errors_are_messages_not_import_failures_and_are_not_retried() {
     assert_eq!(cleanup.calls.load(Ordering::SeqCst), 1);
 }
 
-#[tokio::test]
-async fn registry_selects_the_matching_source_and_concurrent_handoffs_import_once() {
-    let store = Arc::new(InMemoryJobStore::default());
+async fn registry_selects_the_matching_source_and_concurrent_handoffs_import_once(
+    factory: &dyn StoreFactory,
+) {
+    let store = factory
+        .create(EventHub::default(), Duration::from_millis(250))
+        .await;
     let source = DownloadSource::External {
         client: "example-client".into(),
     };
@@ -359,9 +371,10 @@ async fn registry_selects_the_matching_source_and_concurrent_handoffs_import_onc
     assert_eq!(wrong.calls.load(Ordering::SeqCst), 0);
 }
 
-#[tokio::test]
-async fn missing_cleanup_is_also_best_effort_and_emits_a_message() {
-    let store = Arc::new(InMemoryJobStore::default());
+async fn missing_cleanup_is_also_best_effort_and_emits_a_message(factory: &dyn StoreFactory) {
+    let store = factory
+        .create(EventHub::default(), Duration::from_millis(250))
+        .await;
     let download = ready(
         &*store,
         DownloadSource::BuiltinNzb,
@@ -387,4 +400,14 @@ async fn missing_cleanup_is_also_best_effort_and_emits_a_message() {
         }
     }
     assert!(found);
+}
+
+pub async fn run(factory: &dyn StoreFactory) {
+    imported_maps_to_completed_and_cleans_once_after_completion(factory).await;
+    generic_import_failure_and_no_match_have_distinct_outcomes(factory).await;
+    unmapped_or_relative_paths_fail_before_import_or_cleanup(factory).await;
+    builtin_jobs_require_the_original_movie_id(factory).await;
+    cleanup_errors_are_messages_not_import_failures_and_are_not_retried(factory).await;
+    registry_selects_the_matching_source_and_concurrent_handoffs_import_once(factory).await;
+    missing_cleanup_is_also_best_effort_and_emits_a_message(factory).await;
 }
