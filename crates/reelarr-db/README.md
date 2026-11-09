@@ -55,6 +55,10 @@ exhaustion returns SequenceExhausted rather than wrapping.
 Core Job intentionally contains no executor output path. Once the executor reports
 its **actual local artifact path**, the server/queue coordinator calls
 `SqliteJobStore::set_recovery_path(job_id, Some(path))` (an absolute UTF-8 path).
+For the built-in NZB worker that call is made through `SqliteRecoveryPaths`,
+the adapter implementing `reelarr_nzb::worker::RecoveryPaths`; the worker records
+its staging directory when downloading starts and the published folder once
+extraction finishes. `SqliteJobStore::recovery_path` reads the stored value back.
 This is durable executor metadata, not a segment/progress checkpoint. The NZB
 crate itself does not depend on the database adapter. Startup
 checks the registered file or nonempty directory; missing/unregistered/empty paths

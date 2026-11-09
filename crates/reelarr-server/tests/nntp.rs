@@ -682,3 +682,62 @@ async fn test_connection_is_bounded_by_connect_timeout() {
         started.elapsed()
     );
 }
+
+#[tokio::test]
+async fn saving_and_removing_settings_swaps_the_download_pool() {
+    use reelarr_server::state::DownloadOptions;
+    let mock = Mock::start(PASSWORD, Duration::ZERO).await;
+    let tmp = tempfile::tempdir().unwrap();
+    let db = reelarr_db::Database::connect(tmp.path().join("reelarr.db"))
+        .await
+        .unwrap();
+    let mut options = DownloadOptions::new(tmp.path().join("downloads"));
+    options.trust = NntpTrust::Roots(Arc::new(mock.roots.clone()));
+    let cipher = reelarr_db::secrets::XChaChaSecretCipher::ephemeral().unwrap();
+    let state = AppState::with_options(db, Arc::new(cipher), options);
+    let downloads = state.downloads.clone();
+    downloads.start().await.unwrap();
+    assert_eq!(downloads.current_generation(), None);
+    let router = app(state);
+    let (cookie, csrf) = sign_in(&router).await;
+    let generation_becomes = |want: Option<u64>| {
+        let downloads = downloads.clone();
+        async move {
+            for _ in 0..300 {
+                if downloads.current_generation() == want {
+                    return;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+            panic!("generation never became {want:?}");
+        }
+    };
+    let body = settings_json("localhost", mock.port, set(PASSWORD), serde_json::json!({}));
+    for want in [1, 2] {
+        let resp = call(
+            &router,
+            "PUT",
+            "/api/v1/settings/nntp",
+            &cookie,
+            Some(&csrf),
+            &body,
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        generation_becomes(Some(want)).await;
+    }
+    let resp = call(
+        &router,
+        "DELETE",
+        "/api/v1/settings/nntp",
+        &cookie,
+        Some(&csrf),
+        "",
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+    generation_becomes(None).await;
+    // Pools are lazy: building and retiring them opened no connection.
+    assert_eq!(mock.commands.load(Ordering::SeqCst), 0);
+    downloads.shutdown().await;
+}
