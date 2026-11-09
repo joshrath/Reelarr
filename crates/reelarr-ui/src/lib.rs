@@ -10,6 +10,7 @@
 pub mod app;
 pub mod components;
 pub mod pages;
+pub mod theme;
 
 #[cfg(feature = "ssr")]
 mod server;

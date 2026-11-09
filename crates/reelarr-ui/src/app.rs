@@ -9,15 +9,27 @@ use leptos_router::{
 
 use crate::components::layout::Layout;
 use crate::pages::{
-    library::LibraryPage, login::LoginPage, not_found::NotFoundPage, queue::QueuePage,
-    search::SearchPage, settings::SettingsPage,
+    back_room::BackRoomPage, counter::CounterPage, employees_only::EmployeesOnlyPage,
+    login::LoginPage, not_found::NotFoundPage, record_corner::RecordCornerPage,
+    store_floor::StoreFloorPage,
 };
+use crate::theme::{Prefs, PrefsSignal};
+
+/// Old paths that now permanently redirect to their renamed sections, as
+/// `(from, to)`. The server answers these before the UI renders.
+pub const REDIRECTS: &[(&str, &str)] = &[
+    ("/search", "/counter"),
+    ("/queue", "/back-room"),
+    ("/settings", "/employees-only"),
+];
 
 /// The full HTML document rendered on the server around [`App`].
 pub fn shell(options: LeptosOptions) -> impl IntoView {
+    // Saved display preferences, applied before the first paint.
+    let prefs = Prefs::current();
     view! {
         <!DOCTYPE html>
-        <html lang="en">
+        <html lang="en" data-theme=prefs.theme.as_str() class=prefs.html_class()>
             <head>
                 <meta charset="utf-8" />
                 <meta name="viewport" content="width=device-width, initial-scale=1" />
@@ -37,6 +49,7 @@ pub fn shell(options: LeptosOptions) -> impl IntoView {
 #[component]
 pub fn App() -> impl IntoView {
     provide_meta_context();
+    PrefsSignal::provide();
 
     view! {
         <Stylesheet id="reelarr" href="/pkg/reelarr.css" />
@@ -45,10 +58,14 @@ pub fn App() -> impl IntoView {
         } />
         <Router>
             <Routes fallback=|| view! { <Layout><NotFoundPage /></Layout> }>
-                <Route path=StaticSegment("") view=|| view! { <Layout><LibraryPage /></Layout> } />
-                <Route path=StaticSegment("search") view=|| view! { <Layout><SearchPage /></Layout> } />
-                <Route path=StaticSegment("queue") view=|| view! { <Layout><QueuePage /></Layout> } />
-                <Route path=StaticSegment("settings") view=|| view! { <Layout><SettingsPage /></Layout> } />
+                <Route path=StaticSegment("") view=|| view! { <Layout><StoreFloorPage /></Layout> } />
+                <Route path=StaticSegment("counter") view=|| view! { <Layout><CounterPage /></Layout> } />
+                <Route path=StaticSegment("records") view=|| view! { <Layout><RecordCornerPage /></Layout> } />
+                <Route path=StaticSegment("back-room") view=|| view! { <Layout><BackRoomPage /></Layout> } />
+                <Route
+                    path=StaticSegment("employees-only")
+                    view=|| view! { <Layout><EmployeesOnlyPage /></Layout> }
+                />
                 <Route path=StaticSegment("login") view=LoginPage />
             </Routes>
         </Router>

@@ -18,9 +18,17 @@ async fn test_app() -> Router {
 }
 
 async fn get(path: &str) -> (axum::http::StatusCode, String, String) {
+    get_with_cookie(path, "").await
+}
+
+async fn get_with_cookie(path: &str, cookie: &str) -> (axum::http::StatusCode, String, String) {
+    let mut req = Request::get(path);
+    if !cookie.is_empty() {
+        req = req.header("cookie", cookie);
+    }
     let res = test_app()
         .await
-        .oneshot(Request::get(path).body(Body::empty()).unwrap())
+        .oneshot(req.body(Body::empty()).unwrap())
         .await
         .unwrap();
     let status = res.status();
@@ -38,7 +46,7 @@ async fn get(path: &str) -> (axum::http::StatusCode, String, String) {
 }
 
 #[tokio::test]
-async fn library_page_renders_shell() {
+async fn store_floor_renders_shell() {
     let (status, content_type, body) = get("/").await;
     assert_eq!(status, 200);
     assert!(content_type.starts_with("text/html"));
@@ -47,15 +55,57 @@ async fn library_page_renders_shell() {
     assert!(body.contains("Skip to content"));
     assert!(body.contains(r#"aria-current="page""#));
     assert!(body.contains("/pkg/reelarr"));
+    assert!(body.contains("The Store Floor"));
+    assert!(body.contains(r#"<footer class="app-footer""#));
+    assert!(body.contains(r#"aria-label="Now playing""#));
+    assert!(body.contains(r#"data-theme="80s-vhs""#));
 }
 
 #[tokio::test]
 async fn app_routes_render() {
-    for path in ["/search", "/queue", "/settings"] {
+    for (path, title) in [
+        ("/counter", "The Special Order Counter"),
+        ("/records", "The Record Corner"),
+        ("/back-room", "The Back Room"),
+        ("/employees-only", "Employees Only"),
+    ] {
         let (status, _, body) = get(path).await;
         assert_eq!(status, 200, "{path}");
         assert!(body.contains("<main"), "{path}");
+        assert!(
+            body.contains(&format!(r#"<h1 id="page-title">{title}</h1>"#)),
+            "{path}"
+        );
     }
+}
+
+#[tokio::test]
+async fn old_paths_redirect_to_renamed_sections() {
+    for (from, to) in [
+        ("/search", "/counter"),
+        ("/queue", "/back-room"),
+        ("/settings", "/employees-only"),
+    ] {
+        let res = test_app()
+            .await
+            .oneshot(Request::get(from).body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(
+            res.status(),
+            axum::http::StatusCode::PERMANENT_REDIRECT,
+            "{from}"
+        );
+        assert_eq!(res.headers()["location"], to, "{from}");
+    }
+}
+
+#[tokio::test]
+async fn saved_display_prefs_render_on_the_server() {
+    let (_, _, body) = get_with_cookie("/", "reelarr_theme=70s-wood; reelarr_crt=on").await;
+    assert!(body.contains(r#"data-theme="70s-wood""#));
+    assert!(body.contains(r#"class="crt""#));
+    assert!(body.contains(r#"aria-pressed="true""#));
 }
 
 #[tokio::test]

@@ -20,6 +20,7 @@ leptos_router = "0.8"
 leptos_meta = "0.8"
 leptos_axum = "0.8.10"
 wasm-bindgen = "0.2"
+web-sys = "0.3"
 console_error_panic_hook = "0.1"
 tower = { version = "0.5", features = ["util"] }
 http-body-util = "0.1"
