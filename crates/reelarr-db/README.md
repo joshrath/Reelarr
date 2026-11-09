@@ -55,6 +55,10 @@ exhaustion returns SequenceExhausted rather than wrapping.
 Core Job intentionally contains no executor output path. Once the executor reports
 its **actual local artifact path**, the server/queue coordinator calls
 `SqliteJobStore::set_recovery_path(job_id, Some(path))` (an absolute UTF-8 path).
+For the built-in NZB worker that call is made through `SqliteRecoveryPaths`,
+the adapter implementing `reelarr_nzb::worker::RecoveryPaths`; the worker records
+its staging directory when downloading starts and the published folder once
+extraction finishes. `SqliteJobStore::recovery_path` reads the stored value back.
 This is durable executor metadata, not a segment/progress checkpoint. The NZB
 crate itself does not depend on the database adapter. Startup
 checks the registered file or nonempty directory; missing/unregistered/empty paths
@@ -109,3 +113,27 @@ job row never landed. A later migration that rebuilds `jobs` must recreate the
 in plain JSON. That is the decided policy: archive passwords stay unencrypted
 inside the stored NZB document; encryption covers indexer API keys and NNTP
 passwords only.
+
+## NNTP provider settings (#76)
+
+`SqliteNntpStore::new(&db, Arc<dyn SecretCipher>)` stores the single NNTP
+provider (migration 0009, one row with `id = 1`). Non-secret settings are
+versioned JSON; the AUTHINFO password is encrypted with the same
+`SecretCipher` policy as indexer API keys, bound to its record/field as
+associated data, and is `NULL` for providers without login. Statements are
+string literals (no `format!` SQL).
+
+- `get()` is the API-safe read: it never selects or decrypts the password and
+  reports `has_password`.
+- `save(&NntpServerUpdate)` validates (implicit TLS only, so port 119 is
+  rejected; valid host; 1–100 connections; 1–300 s timeouts; 0–10 retries;
+  printable non-whitespace AUTHINFO tokens; username and password together),
+  then encrypts and upserts inside one `BEGIN IMMEDIATE` transaction. The
+  password is `keep`, `set` or `clear`; `keep` is refused when the host
+  changes.
+- `resolve(&NntpServerUpdate)` applies an update to the stored row exactly as
+  `save` would, without writing, for test-connection.
+- `load()` decrypts for trusted pool construction. A wrong key, moved
+  ciphertext or out-of-band invalid settings fail closed as `Store`.
+
+Errors are static text; no SQL, bind values or credentials are retained.

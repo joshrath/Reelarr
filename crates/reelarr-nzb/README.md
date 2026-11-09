@@ -122,6 +122,13 @@ multi-provider priority/fill, SASL, pipelining, ARTICLE compatibility fallback
 and NNTP compression remain separate work. No real-provider credentials or
 network access are needed for tests.
 
+`Pool::probe()` is the settings check behind test-connection. It opens a fresh
+connection, completes TCP, verified TLS, the greeting and AUTHINFO, then sends a
+best-effort QUIT. It requests no article, never pools the socket, and the
+whole exchange (including waiting for a slot) is bounded by `timeouts.connect`.
+`ServerConfig::validate()` and `validate_credential()` expose the pool's local
+rules so settings can be checked before saving.
+
 See [the NNTP source/license ledger](../../docs/nntp.md) for provenance and
 resolved dependency licenses.
 

@@ -12,6 +12,7 @@ path = "src/main.rs"
 
 [dependencies]
 reelarr-db = { version = "0.0.1", path = "../reelarr-db" }
+reelarr-nzb = { version = "0.0.1", path = "../reelarr-nzb" }
 reelarr-types = { version = "0.0.1", path = "../reelarr-types" }
 reelarr-ui = { version = "0.0.1", path = "../reelarr-ui", features = ["ssr"] }
 leptos = { workspace = true, features = ["ssr"] }
@@ -24,8 +25,14 @@ reelarr-stream = { version = "0.0.1", path = "../reelarr-stream" }
 reelarr-media = { version = "0.0.1", path = "../reelarr-media" }
 serde = { workspace = true }
 subtle = "2"
+async-trait = { workspace = true }
+thiserror = { workspace = true }
 
 [dev-dependencies]
+crc32fast = "1.5"
+rcgen = { version = "0.14", default-features = false, features = ["ring"] }
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
+tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "tls12"] }
 sqlx = { workspace = true }
 tempfile = { workspace = true }
 tower = { workspace = true }

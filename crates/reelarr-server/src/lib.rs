@@ -1,7 +1,9 @@
 //! Server composition boundary shared with the UI integration.
 pub mod api;
 pub mod auth;
+pub mod downloads;
 pub mod library;
+pub mod nntp;
 pub mod state;
 pub mod stream;
 

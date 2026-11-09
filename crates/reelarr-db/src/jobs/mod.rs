@@ -2,7 +2,7 @@
 
 use std::{
     collections::HashMap,
-    path::Path,
+    path::{Path, PathBuf},
     sync::Arc,
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
@@ -184,6 +184,20 @@ impl SqliteJobStore {
             return Err(JobStoreError::NotFound(id));
         }
         Ok(())
+    }
+
+    /// The artifact path last registered with [`Self::set_recovery_path`].
+    pub async fn recovery_path(&self, id: JobId) -> Result<Option<PathBuf>, JobStoreError> {
+        let row: Option<(Option<String>,)> =
+            sqlx::query_as("SELECT recovery_path FROM jobs WHERE id = ?")
+                .bind(id.to_string())
+                .fetch_optional(&self.pool)
+                .await
+                .map_err(backend)?;
+        match row {
+            Some((path,)) => Ok(path.map(PathBuf::from)),
+            None => Err(JobStoreError::NotFound(id)),
+        }
     }
 
     /// Run after migrations and before binding/starting workers. Unreadable paths

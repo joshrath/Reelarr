@@ -203,3 +203,51 @@ DTOs**. API integrations must use `list_summaries/get_summary` or an explicit
 secret-free projection; the summaries contain only name, enabled, ordered extra
 hosts and `has_api_key`, never ciphertext or plaintext. The store's errors/debug
 and database statement logging do not expose secrets or SQL bind values.
+
+## NNTP provider settings (#76)
+
+The server now initializes the secret cipher at startup, after migrations and
+before binding: `REELARR_SECRET_KEY` if set, otherwise
+`$REELARR_DATA_DIR/secret.key` (created on first start, mode 0600). An invalid
+key stops startup with a static error that never includes the value. The same
+key protects indexer API keys and the NNTP password, so the backup/recovery
+notes above apply to both.
+
+Reelarr talks to **one** NNTP provider (no multi-server fallback yet), always
+over implicit TLS (normally port 563) with certificate-chain and hostname
+verification against the system trust store. Port 119 (plaintext NNTP) is
+rejected. Configure it through the authenticated API:
+
+| Method | Path | Notes |
+| --- | --- | --- |
+| `GET` | `/api/v1/settings/nntp` | Settings plus `has_password`; 404 `not_configured` if unset |
+| `PUT` | `/api/v1/settings/nntp` | Save; CSRF required |
+| `DELETE` | `/api/v1/settings/nntp` | Forget the provider and password; CSRF required |
+| `POST` | `/api/v1/settings/nntp/test` | TLS + login check of the posted settings, without saving; CSRF required |
+
+The password is write-only. Send `{"action":"set","value":"…"}` to replace it,
+`{"action":"clear"}` to remove it, or `{"action":"keep"}` (or omit the field)
+to leave it unchanged. `keep` is refused with `password_required` when the host
+changes, so a saved password is never sent to a different server without being
+re-entered. Bounds: 1–100 connections, 1–300 second connect/IO timeouts, 0–10
+retries. The test-connection request fetches no article and the whole attempt
+is limited by the connect timeout.
+
+Saved settings apply to new work only. New jobs use a pool built from the new
+settings, while downloads already running finish on the pool they started with;
+running downloads are never interrupted. The old pool is closed once its last
+download ends. With no provider configured (or a disabled one), downloads stay
+queued until one is saved.
+
+## Built-in downloader (#76)
+
+The download scheduler starts after restart recovery and before the listener is
+bound. It works in `$REELARR_DOWNLOADS_DIR` (default `/downloads/reelarr`, inside
+the `/downloads` volume): `incomplete/` holds per-job staging and `complete/`
+the finished downloads waiting for import. The folder must belong to Reelarr
+alone. `REELARR_MAX_ACTIVE_DOWNLOADS` (default 2) limits how many jobs run at
+once; the provider's connections are split evenly between them. Jobs start in
+priority order, then queue position. A higher-priority job waits for a free slot
+and never interrupts a running one. On shutdown (SIGTERM or Ctrl-C) running
+downloads stop at a checkpoint and resume on the next start. Damaged downloads
+are checked with PAR2; repair itself is not supported yet.

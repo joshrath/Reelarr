@@ -4,6 +4,7 @@ use serde::{Deserialize, Serialize};
 
 pub mod job;
 pub mod movie;
+pub mod nntp;
 pub mod playback;
 pub use job::{JobEvent, JobEventKind, JobState, Progress};
 
@@ -12,6 +13,9 @@ pub use movie::{
     LibraryRootInfo, LibraryRootKind, MediaFile, MediaFileId, MediaFileStatus, MediaKind,
     MediaProbe, MediaStream, Movie, MovieId, MovieMetadata, MovieSearchResult, NewLibraryRoot,
     RootHealth, StreamKind,
+};
+pub use nntp::{
+    NntpServerSettings, NntpServerUpdate, NntpTestOutcome, NntpTestResult, PasswordUpdate,
 };
 pub use playback::{PlaybackInfo, PlaybackMethod, UnsupportedKind, UnsupportedReason};
 
