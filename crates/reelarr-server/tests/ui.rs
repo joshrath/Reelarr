@@ -129,6 +129,20 @@ async fn pkg_assets_revalidate() {
 }
 
 #[tokio::test]
+async fn font_assets_revalidate() {
+    let res = test_app()
+        .await
+        .oneshot(
+            Request::get("/fonts/plus-jakarta-sans-var.woff2")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(res.headers()["cache-control"], "no-cache");
+}
+
+#[tokio::test]
 async fn api_responses_keep_their_own_headers() {
     let res = test_app()
         .await

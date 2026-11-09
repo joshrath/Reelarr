@@ -24,9 +24,9 @@ COPY . .
 # Builds the server binary and the web UI (WASM, JS and CSS in target/site).
 # Cache mounts keep the registry and target dir between builds, so the
 # outputs are copied to /out within the same step.
-RUN --mount=type=cache,target=/usr/local/cargo/registry \
-    --mount=type=cache,target=/usr/local/cargo/git \
-    --mount=type=cache,target=/src/target \
+RUN --mount=type=cache,id=cargo-registry-${TARGETARCH},target=/usr/local/cargo/registry \
+    --mount=type=cache,id=cargo-git-${TARGETARCH},target=/usr/local/cargo/git \
+    --mount=type=cache,id=cargo-target-${TARGETARCH},target=/src/target \
     cargo leptos build --release \
     && mkdir -p /out \
     && cp target/release/reelarr /out/reelarr \
