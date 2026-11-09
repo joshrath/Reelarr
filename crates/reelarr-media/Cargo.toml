@@ -7,9 +7,9 @@ license.workspace = true
 repository.workspace = true
 
 [dependencies]
-reelarr-types = { path = "../reelarr-types" }
-reelarr-db = { path = "../reelarr-db" }
-reelarr-stream = { path = "../reelarr-stream" }
+reelarr-types = { version = "0.0.1", path = "../reelarr-types" }
+reelarr-db = { version = "0.0.1", path = "../reelarr-db" }
+reelarr-stream = { version = "0.0.1", path = "../reelarr-stream" }
 sqlx = { workspace = true }
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 serde = { workspace = true }

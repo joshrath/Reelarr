@@ -1,107 +1,292 @@
-/* Reelarr UI styles. Plain CSS with design tokens; no build-time tooling. */
+/* Reelarr UI styles. One plain CSS file, no build-time tooling.
+ * Section 1 holds the design tokens; components follow. */
+
+/* ==== 1. Tokens ========================================================== */
+/* Design tokens from Josh's Reelarr design (josh-ui-v1).
+ * Colour names follow the design's palette. Use `font: var(--type-*)`
+ * together with `letter-spacing: var(--tracking-*)`. */
+
+@font-face {
+  font-family: "Bebas Neue";
+  src: url("/fonts/bebas-neue-400.woff2") format("woff2");
+  font-weight: 400;
+  font-display: swap;
+}
+@font-face {
+  font-family: "Plus Jakarta Sans";
+  src: url("/fonts/plus-jakarta-sans-var.woff2") format("woff2");
+  font-weight: 200 800;
+  font-display: swap;
+}
+@font-face {
+  font-family: "Space Mono";
+  src: url("/fonts/space-mono-400.woff2") format("woff2");
+  font-weight: 400;
+  font-display: swap;
+}
+@font-face {
+  font-family: "Space Mono";
+  src: url("/fonts/space-mono-700.woff2") format("woff2");
+  font-weight: 700;
+  font-display: swap;
+}
+@font-face {
+  font-family: "Space Mono";
+  src: url("/fonts/space-mono-400-italic.woff2") format("woff2");
+  font-weight: 400;
+  font-style: italic;
+  font-display: swap;
+}
 
 :root {
-  color-scheme: dark light;
+  color-scheme: dark;
 
-  --color-bg: #0f1115;
-  --color-surface: #181b22;
-  --color-surface-raised: #20242d;
-  --color-border: #2e3440;
-  --color-text: #e8eaf0;
-  --color-text-muted: #a3a9b7;
-  --color-accent: #7aa2ff;
-  --color-accent-contrast: #0b1020;
-  --color-danger: #ff8a8a;
-  --color-focus: #ffd166;
+  /* Palette (80s VHS, the default theme). */
+  --color-background: #11131a;
+  --color-error: #ffb4ab;
+  --color-error-container: #93000a;
+  --color-inverse-on-surface: #2e3038;
+  --color-inverse-primary: #006a60;
+  --color-inverse-surface: #e2e2ec;
+  --color-on-background: #e2e2ec;
+  --color-on-error: #690005;
+  --color-on-error-container: #ffdad6;
+  --color-on-primary: #003731;
+  --color-on-primary-container: #006258;
+  --color-on-primary-fixed: #00201c;
+  --color-on-primary-fixed-variant: #005048;
+  --color-on-secondary: #65002f;
+  --color-on-secondary-container: #fffbff;
+  --color-on-secondary-fixed: #3f001b;
+  --color-on-secondary-fixed-variant: #8f0045;
+  --color-on-surface: #e2e2ec;
+  --color-on-surface-variant: #b9cac6;
+  --color-on-tertiary: #412d00;
+  --color-on-tertiary-container: #725100;
+  --color-on-tertiary-fixed: #271900;
+  --color-on-tertiary-fixed-variant: #5e4200;
+  --color-outline: #849490;
+  --color-outline-variant: #3b4a47;
+  --color-primary: #71ffec;
+  --color-primary-container: #00e5d0;
+  --color-primary-fixed: #41fce6;
+  --color-primary-fixed-dim: #00deca;
+  --color-secondary: #ffb1c5;
+  --color-secondary-container: #e30071;
+  --color-secondary-fixed: #ffd9e1;
+  --color-secondary-fixed-dim: #ffb1c5;
+  --color-surface: #11131a;
+  --color-surface-bright: #373941;
+  --color-surface-container: #1d1f27;
+  --color-surface-container-high: #282a31;
+  --color-surface-container-highest: #33343c;
+  --color-surface-container-low: #191b22;
+  --color-surface-container-lowest: #0c0e15;
+  --color-surface-dim: #11131a;
+  --color-surface-tint: #00deca;
+  --color-surface-variant: #33343c;
+  --color-tertiary: #ffe6be;
+  --color-tertiary-container: #ffc34d;
+  --color-tertiary-fixed: #ffdea8;
+  --color-tertiary-fixed-dim: #ffba20;
+  /* AA nudge: the design's outline (#849490) is 3.63:1 on surface-bright.
+     Kept for borders; this lighter value is for text. */
+  --color-outline-text: #97a5a1;
+  /* Filled primary buttons; the 70s theme splits these from primary text. */
+  --color-primary-fill: var(--color-primary);
+  --color-on-primary-fill: var(--color-on-primary);
 
-  --font-sans: system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
-  --radius: 0.5rem;
-  --space-1: 0.25rem;
-  --space-2: 0.5rem;
-  --space-3: 0.75rem;
-  --space-4: 1rem;
-  --space-6: 1.5rem;
-  --space-8: 2rem;
-  --content-width: 72rem;
+  /* Type. */
+  --font-display: "Bebas Neue", Impact, "Arial Narrow", sans-serif;
+  --font-body: "Plus Jakarta Sans", system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  --font-mono: "Space Mono", ui-monospace, "SFMono-Regular", Menlo, Consolas, monospace;
+  --type-body-lg: 400 1rem/1.5rem var(--font-body);
+  --tracking-body-lg: normal;
+  --type-body-md: 400 0.875rem/1.25rem var(--font-body);
+  --tracking-body-md: normal;
+  --type-body-sm: 400 0.75rem/1rem var(--font-body);
+  --tracking-body-sm: normal;
+  --type-display-lg: 400 3.5rem/3.5rem var(--font-display);
+  --tracking-display-lg: 0.04em;
+  --type-display-lg-mobile: 400 2.25rem/2.375rem var(--font-display);
+  --tracking-display-lg-mobile: 0.03em;
+  --type-headline-lg: 400 1.75rem/2rem var(--font-display);
+  --tracking-headline-lg: 0.02em;
+  --type-headline-md: 400 1.375rem/1.625rem var(--font-display);
+  --tracking-headline-md: 0.02em;
+  --type-headline-xl: 400 2.5rem/2.625rem var(--font-display);
+  --tracking-headline-xl: 0.03em;
+  --type-headline-xl-mobile: 400 1.75rem/1.875rem var(--font-display);
+  --tracking-headline-xl-mobile: 0.02em;
+  --type-label-lg: 700 0.875rem/1.125rem var(--font-mono);
+  --tracking-label-lg: 0.05em;
+  --type-label-md: 400 0.75rem/1rem var(--font-mono);
+  --tracking-label-md: 0.04em;
+  --type-label-sm: 400 0.625rem/0.75rem var(--font-mono);
+  --tracking-label-sm: 0.06em;
+  --type-osd-counter: 700 1.125rem/1.25rem var(--font-mono);
+  --tracking-osd-counter: 0.12em;
+  --type-title-md: 700 1rem/1.375rem var(--font-body);
+  --tracking-title-md: normal;
+
+  /* Spacing. */
+  --space-xs: 0.25rem;
+  --space-sm: 0.5rem;
+  --space-md: 1rem;
+  --space-lg: 1.5rem;
+  --space-xl: 2.5rem;
+  --gutter-mobile: 0.75rem;
+  --gutter: 1.25rem;
+  --gutter-desktop: 1.5rem;
+  --margin-mobile: 1rem;
+  --margin: 1.5rem;
+  --margin-desktop: 2.5rem;
+
+  /* Radii. */
+  --radius-sm: 0.125rem;
+  --radius: 0.125rem;
+  --radius-lg: 0.25rem;
+  --radius-xl: 0.5rem;
+  --radius-full: 0.75rem;
+
+  /* Focus ring: not in the design, kept for keyboard users. */
+  --color-focus: var(--color-tertiary-fixed-dim);
+
+  --content-width: 90rem;
   --transition: 150ms ease;
 }
 
-@media (prefers-color-scheme: light) {
-  :root {
-    --color-bg: #f6f7fa;
-    --color-surface: #ffffff;
-    --color-surface-raised: #eef0f5;
-    --color-border: #d4d8e1;
-    --color-text: #161a22;
-    --color-text-muted: #535b6b;
-    --color-accent: #2f5bd3;
-    --color-accent-contrast: #ffffff;
-    --color-danger: #b42318;
-    --color-focus: #8a5a00;
-  }
+/* 70s wood paneling alternate theme. */
+:root[data-theme="70s-wood"] {
+  --color-background: #160e08;
+  --color-surface: #160e08;
+  --color-surface-container-lowest: #160e08;
+  --color-surface-container-low: #21150e;
+  --color-surface-container: #2a1b12;
+  --color-surface-container-high: #382419;
+  --color-surface-container-highest: #483022;
+  --color-on-surface: #f3ede2;
+  --color-on-background: #f3ede2;
+  --color-primary: #f59e0b;
+  --color-primary-fill: #d97706;
+  --color-on-primary-fill: #1c0f05;
+}
+
+/* CRT scanlines, toggled with a class on the root. Static, so reduced
+   motion keeps it; forced-colours mode drops it. */
+.crt::after {
+  content: "";
+  position: fixed;
+  inset: 0;
+  z-index: 1000;
+  pointer-events: none;
+  background: linear-gradient(rgba(18, 16, 16, 0) 50%, rgba(0, 0, 0, 0.4) 50%);
+  background-size: 100% 4px;
+}
+
+@media (forced-colors: active) {
+  .crt::after { display: none; }
 }
 
 @media (prefers-reduced-motion: reduce) {
   :root { --transition: 0s; }
-  *, *::before, *::after { scroll-behavior: auto !important; }
+  *, *::before, *::after {
+    scroll-behavior: auto !important;
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
 }
+
+/* ==== 2. Base and components ============================================ */
 
 *, *::before, *::after { box-sizing: border-box; }
 
-html { font-family: var(--font-sans); line-height: 1.5; }
+html {
+  font: var(--type-body-md);
+  background: var(--color-background);
+  color: var(--color-on-surface);
+}
 
 body {
   margin: 0;
   min-height: 100vh;
-  background: var(--color-bg);
-  color: var(--color-text);
+  overscroll-behavior: none;
 }
 
-a { color: var(--color-accent); }
+h1, h2, h3 {
+  font-weight: 400;
+  margin: 0 0 var(--space-md);
+}
+h1 { font: var(--type-headline-xl); letter-spacing: var(--tracking-headline-xl); }
+h2 { font: var(--type-headline-lg); letter-spacing: var(--tracking-headline-lg); }
+h3 { font: var(--type-headline-md); letter-spacing: var(--tracking-headline-md); }
+
+a { color: var(--color-primary); }
 
 :focus-visible {
-  outline: 3px solid var(--color-focus);
+  outline: 2px solid var(--color-focus);
   outline-offset: 2px;
 }
 
-.muted { color: var(--color-text-muted); }
+.icon { flex: none; vertical-align: -0.125em; }
+
+.muted { color: var(--color-on-surface-variant); }
+
+.label {
+  font: var(--type-label-md);
+  letter-spacing: var(--tracking-label-md);
+  text-transform: uppercase;
+}
+
+.visually-hidden {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  margin: -1px;
+  padding: 0;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  white-space: nowrap;
+  border: 0;
+}
 
 /* Skip link: hidden until focused. */
 .skip-link {
   position: absolute;
-  left: var(--space-2);
+  left: var(--space-sm);
   top: -3rem;
-  padding: var(--space-2) var(--space-4);
-  background: var(--color-surface-raised);
-  color: var(--color-text);
+  padding: var(--space-sm) var(--space-md);
+  background: var(--color-primary-fill);
+  color: var(--color-on-primary-fill);
+  font: var(--type-label-lg);
   border-radius: var(--radius);
-  z-index: 10;
+  z-index: 1001;
   transition: top var(--transition);
 }
-.skip-link:focus { top: var(--space-2); }
+.skip-link:focus { top: var(--space-sm); }
 
-/* Header and navigation. */
+/* Header and navigation. Restyled to the design in the shell PR. */
 .app-header {
   display: flex;
   flex-wrap: wrap;
   align-items: center;
-  gap: var(--space-4) var(--space-8);
-  padding: var(--space-3) var(--space-6);
-  background: var(--color-surface);
-  border-bottom: 1px solid var(--color-border);
+  gap: var(--space-md) var(--space-xl);
+  padding: var(--space-sm) var(--margin);
+  background: var(--color-surface-container-lowest);
 }
 
 .brand {
-  font-weight: 700;
-  font-size: 1.25rem;
-  color: var(--color-text);
+  font: var(--type-headline-md);
+  letter-spacing: var(--tracking-headline-md);
+  color: var(--color-primary);
   text-decoration: none;
 }
 
 .main-nav ul {
   display: flex;
   flex-wrap: wrap;
-  gap: var(--space-1);
+  gap: var(--space-xs);
   margin: 0;
   padding: 0;
   list-style: none;
@@ -109,73 +294,87 @@ a { color: var(--color-accent); }
 
 .main-nav a {
   display: block;
-  padding: var(--space-2) var(--space-3);
+  padding: var(--space-sm) var(--space-md);
   border-radius: var(--radius);
-  color: var(--color-text-muted);
+  font: var(--type-label-md);
+  letter-spacing: var(--tracking-label-md);
+  text-transform: uppercase;
+  color: var(--color-on-surface-variant);
   text-decoration: none;
   transition: background var(--transition), color var(--transition);
 }
-.main-nav a:hover { background: var(--color-surface-raised); color: var(--color-text); }
+.main-nav a:hover { background: var(--color-surface-container-high); color: var(--color-on-surface); }
 .main-nav a[aria-current="page"] {
-  background: var(--color-surface-raised);
-  color: var(--color-text);
-  box-shadow: inset 0 -2px 0 var(--color-accent);
+  background: var(--color-primary-fill);
+  color: var(--color-on-primary-fill);
 }
 
 /* Main content. */
 .app-main {
   max-width: var(--content-width);
   margin: 0 auto;
-  padding: var(--space-8) var(--space-6);
+  padding: var(--space-xl) var(--margin-desktop);
 }
 .app-main:focus { outline: none; }
-
-.page h1 { margin-top: 0; }
 
 /* Sign-in. */
 .auth-main {
   display: grid;
   place-items: center;
   min-height: 100vh;
-  padding: var(--space-6);
+  padding: var(--margin);
 }
 
 .auth-card {
   width: min(100%, 24rem);
   display: grid;
-  gap: var(--space-4);
-  padding: var(--space-8);
-  background: var(--color-surface);
-  border: 1px solid var(--color-border);
-  border-radius: var(--radius);
+  gap: var(--space-md);
+  padding: var(--space-xl);
+  background: var(--color-surface-container-low);
+  border-radius: var(--radius-lg);
 }
-.auth-card h1 { margin: 0; font-size: 1.5rem; }
+.auth-card h1 { margin: 0; }
 
-.field { display: grid; gap: var(--space-1); }
-.field label { font-weight: 600; }
+.field { display: grid; gap: var(--space-xs); }
+.field label {
+  font: var(--type-label-md);
+  letter-spacing: var(--tracking-label-md);
+  text-transform: uppercase;
+  color: var(--color-on-surface-variant);
+}
 .field input {
-  padding: var(--space-2) var(--space-3);
-  font: inherit;
-  color: var(--color-text);
-  background: var(--color-bg);
-  border: 1px solid var(--color-border);
+  padding: var(--space-sm) var(--space-md);
+  font: var(--type-body-lg);
+  color: var(--color-on-surface);
+  background: var(--color-surface-container-lowest);
+  border: 1px solid var(--color-outline-variant);
   border-radius: var(--radius);
 }
 
-.form-error { margin: 0; min-height: 1.5em; color: var(--color-danger); }
+.form-error { margin: 0; min-height: 1.5em; color: var(--color-error); }
 
 .button {
-  padding: var(--space-2) var(--space-4);
-  font: inherit;
-  font-weight: 600;
-  border: 1px solid transparent;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: var(--space-xs);
+  min-height: 2.5rem;
+  padding: 0 var(--space-lg);
+  font: var(--type-label-lg);
+  letter-spacing: var(--tracking-label-lg);
+  text-transform: uppercase;
+  color: var(--color-on-surface);
+  background: var(--color-surface-container);
+  border: 0;
   border-radius: var(--radius);
   cursor: pointer;
 }
-.button.primary { background: var(--color-accent); color: var(--color-accent-contrast); }
-.button.primary:hover { filter: brightness(1.1); }
+.button:hover { background: var(--color-surface-bright); }
+.button.primary { background: var(--color-primary-fill); color: var(--color-on-primary-fill); }
+.button.primary:hover { filter: brightness(1.08); }
 
-@media (max-width: 40rem) {
-  .app-header { padding: var(--space-3) var(--space-4); }
-  .app-main { padding: var(--space-6) var(--space-4); }
+@media (max-width: 48rem) {
+  .app-header { padding: var(--space-sm) var(--margin-mobile); }
+  .app-main { padding: var(--space-lg) var(--margin-mobile); }
+  h1 { font: var(--type-headline-xl-mobile); }
 }

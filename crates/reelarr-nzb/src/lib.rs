@@ -1,10 +1,11 @@
-//! Bounded NZB parsing, streaming yEnc decoding, disk assembly and segment storage.
+//! Bounded NZB parsing, TLS NNTP retrieval, yEnc decoding and disk assembly.
 //!
 //! Core owns job lifecycle and scheduling; this crate stores only NZB execution
 //! data. `reelarr-db` will implement [`NzbStore`] in the shared SQLite database.
 //! No subject, group or message ID is interpreted as a filesystem path.
 
 pub mod assembly;
+pub mod nntp;
 mod parser;
 mod store;
 pub mod yenc;

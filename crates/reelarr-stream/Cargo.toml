@@ -7,7 +7,7 @@ license.workspace = true
 repository.workspace = true
 
 [dependencies]
-reelarr-types = { path = "../reelarr-types" }
+reelarr-types = { version = "0.0.1", path = "../reelarr-types" }
 axum = { workspace = true }
 tokio = { workspace = true }
 tokio-util = { version = "0.7", features = ["io"] }
