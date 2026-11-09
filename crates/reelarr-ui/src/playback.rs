@@ -39,7 +39,8 @@ pub enum Notice {
     Offline,
     /// 500 or anything unexpected.
     TryAgain,
-    /// A DVD or Blu-ray rip. Holds the server's message.
+    /// A DVD or Blu-ray rip (ISO image or disc folder). Holds the server's
+    /// message.
     Disc(String),
     /// The browser can't play this file yet. Holds the server's reasons.
     Unsupported(Vec<String>),
@@ -101,11 +102,12 @@ pub fn deck_state(result: Result<PlaybackInfo, ApiFailure>) -> DeckState {
 }
 
 fn from_info(info: PlaybackInfo) -> DeckState {
-    if let Some(disc) = info
-        .unsupported
-        .iter()
-        .find(|r| r.kind == UnsupportedKind::DiscImage)
-    {
+    if let Some(disc) = info.unsupported.iter().find(|r| {
+        matches!(
+            r.kind,
+            UnsupportedKind::DiscImage | UnsupportedKind::DiscFolder
+        )
+    }) {
         return DeckState::Notice(Notice::Disc(disc.message.clone()));
     }
     match (info.method, info.stream_url) {
@@ -255,6 +257,23 @@ mod tests {
             panic!("expected a notice, got {state:?}");
         };
         assert_eq!(notice.message(), "Disc image (not yet playable)");
+    }
+
+    #[test]
+    fn disc_folder_shows_the_server_message() {
+        let state = deck_state(Ok(info(
+            PlaybackMethod::Unsupported,
+            vec![UnsupportedReason {
+                kind: UnsupportedKind::DiscFolder,
+                name: None,
+                message: "DVD/Blu-ray folder (not yet playable)".into(),
+            }],
+        )));
+        let DeckState::Notice(notice) = state else {
+            panic!("expected a notice, got {state:?}");
+        };
+        assert!(matches!(notice, Notice::Disc(_)));
+        assert_eq!(notice.message(), "DVD/Blu-ray folder (not yet playable)");
     }
 
     #[test]
