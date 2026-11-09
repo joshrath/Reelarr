@@ -8,6 +8,32 @@ Reelarr is written from scratch. Radarr, Sonarr, Prowlarr, Jellyfin, SABnzbd and
 
 Third-party crates are welcome as long as their licenses are compatible with GPL-3.0.
 
+## Dependency policy
+
+Install the same cargo-deny version used by the SHA-pinned CI action, then audit
+all four checks against the checked-in lockfile:
+
+```sh
+cargo install cargo-deny --locked --version 0.20.2
+cargo deny --locked check --warn unmaintained
+```
+
+`deny.toml` enumerates reviewed GPL-3.0-compatible SPDX identifiers. Unknown
+licenses, vulnerabilities/unsoundness, wildcard requirements and non-crates.io
+sources fail CI. Modern cargo-deny config selects unmaintained *scope*, not
+severity; the narrow `--warn unmaintained` flag implements our requested warning
+policy without hiding an advisory or weakening vulnerability checks. Yanked and
+duplicate versions also warn and must be reviewed.
+
+Do not silence findings or broaden allowances just to pass. License exceptions
+must name an exact crate/version, explain compatibility and redistribution
+obligations inline, and update [the review record](docs/dependency-policy.md).
+Advisory exceptions need an advisory id, concrete justification and removal plan;
+none are currently ignored. Keep explicit versions on internal path dependencies
+and update them together with the workspace version (omitting a version is an
+implicit wildcard). Preserve required third-party license/NOTICE/source/relinking
+materials when packaging releases; cargo-deny is not a substitute for that work.
+
 ## Workflow
 
 1. Pick or open an issue and say you're working on it.

@@ -1,0 +1,66 @@
+# Reviewed for distribution of Reelarr under GPL-3.0-or-later.
+[graph]
+all-features = true
+exclude-dev = false
+
+[advisories]
+db-urls = ["https://github.com/RustSec/advisory-db"]
+# Vulnerabilities are errors by cargo-deny default; none are ignored.
+# Modern cargo-deny controls unmaintained *scope* here, not severity. CI and the
+# documented local command use --warn unmaintained, and no broader lint override.
+unmaintained = "all"
+unsound = "all"
+yanked = "warn"
+ignore = []
+
+[licenses]
+confidence-threshold = 0.95
+include-dev = true
+include-build = true
+allow = [
+    "MIT", "Apache-2.0", "BSD-2-Clause", "BSD-3-Clause", "ISC", "Zlib",
+    "Unicode-3.0", "Unicode-DFS-2016",
+    # MPL 2.0 permits GPLv3 combination via its secondary-license mechanism;
+    # preserve file-level source/notices and review any Exhibit B restriction.
+    "MPL-2.0",
+    # Exact GNU identifiers, not a blanket GNU/copyleft allowance. Preserve
+    # corresponding-source/notices; LGPL also requires relinking/reverse-
+    # engineering rights. A -only dependency selects GPLv3 for the combination.
+    "GPL-3.0-only", "GPL-3.0-or-later", "LGPL-3.0-only", "LGPL-3.0-or-later",
+]
+
+
+# Narrow, version-bound reviews of the four license findings in the initial
+# locked graph. New crates/versions with these licenses require a new review.
+# CC0's public-domain dedication/fallback is GPL-compatible; no patent grant is
+# assumed. Keep the license text with the reviewed build-time encoding helper.
+[[licenses.exceptions]]
+crate = "base16@=0.2.1"
+allow = ["CC0-1.0"]
+
+# These crates distribute Mozilla certificate *data*. CDLA-Permissive 2.0 allows
+# redistribution/modification with its agreement text; no downstream copyleft or
+# restrictions on results. Release bundles must retain that text with the data.
+[[licenses.exceptions]]
+crate = "webpki-roots@=1.0.11"
+allow = ["CDLA-Permissive-2.0"]
+[[licenses.exceptions]]
+crate = "webpki-root-certs@=1.0.11"
+allow = ["CDLA-Permissive-2.0"]
+
+# Boost Software License is permissive/GPL-compatible. Preserve its copyright
+# and license in source distributions (the license exempts pure object code).
+[[licenses.exceptions]]
+crate = "xxhash-rust@=0.8.19"
+allow = ["BSL-1.0"]
+
+[bans]
+multiple-versions = "warn"
+wildcards = "deny"
+highlight = "all"
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]
+allow-git = []

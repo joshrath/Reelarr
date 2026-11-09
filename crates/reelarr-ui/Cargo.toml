@@ -13,7 +13,7 @@ crate-type = ["cdylib", "rlib"]
 leptos = { workspace = true }
 leptos_router = { workspace = true }
 leptos_meta = { workspace = true }
-reelarr-types = { path = "../reelarr-types" }
+reelarr-types = { version = "0.0.1", path = "../reelarr-types" }
 serde = { workspace = true }
 
 # Server-side rendering (native).

@@ -7,7 +7,7 @@ license.workspace = true
 repository.workspace = true
 
 [dependencies]
-reelarr-core = { path = "../reelarr-core" }
+reelarr-core = { version = "0.0.1", path = "../reelarr-core" }
 async-trait = { workspace = true }
 thiserror = { workspace = true }
 sqlx = { workspace = true }
