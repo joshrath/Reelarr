@@ -2,6 +2,7 @@
 
 use std::path::{Path, PathBuf};
 
+use crate::scan::disc;
 use crate::scan::is_video_file;
 
 /// What was found in a download's output.
@@ -11,6 +12,11 @@ pub struct Selection {
     pub subtitles: Vec<PathBuf>,
     /// Archive or par2 leftovers, which mean extraction did not finish.
     pub leftovers: Vec<PathBuf>,
+    /// DVD or Blu-ray folder rips, which are not walked into.
+    pub disc_folders: Vec<PathBuf>,
+    /// The largest non-sample `.iso`, used only when there is no video.
+    /// Its signature is checked by the importer.
+    pub image: Option<(PathBuf, u64)>,
 }
 
 /// Subtitle sidecar extensions that are carried over.
@@ -54,13 +60,33 @@ fn looks_like_sample(path: &Path) -> bool {
 pub fn select(output: &Path, min_bytes: u64) -> std::io::Result<Selection> {
     let mut selection = Selection::default();
     let mut videos: Vec<(PathBuf, u64)> = Vec::new();
-    for entry in walkdir::WalkDir::new(output).follow_links(false) {
+    let mut images: Vec<(PathBuf, u64)> = Vec::new();
+    let mut it = walkdir::WalkDir::new(output)
+        .follow_links(false)
+        .into_iter();
+    while let Some(entry) = it.next() {
         let entry = entry.map_err(std::io::Error::other)?;
+        let path = entry.path();
+        if entry.file_type().is_dir() {
+            if disc::disc_folder_format(path)?.is_some() {
+                selection.disc_folders.push(path.to_owned());
+                it.skip_current_dir();
+            } else if entry.depth() > 0
+                && disc::is_disc_structure_dir(&entry.file_name().to_string_lossy())
+            {
+                // The download itself is a bare VIDEO_TS/BDMV tree.
+                selection.disc_folders.push(path.to_owned());
+                it.skip_current_dir();
+            }
+            continue;
+        }
         if !entry.file_type().is_file() {
             continue;
         }
-        let path = entry.path();
-        if is_leftover(path) {
+        if disc::is_iso_path(path) && !looks_like_sample(path) {
+            let size = entry.metadata().map_err(std::io::Error::other)?.len();
+            images.push((path.to_owned(), size));
+        } else if is_leftover(path) {
             selection.leftovers.push(path.to_owned());
         } else if SUBTITLE_EXTENSIONS.contains(&ext(path).as_str()) {
             selection.subtitles.push(path.to_owned());
@@ -73,12 +99,25 @@ pub fn select(output: &Path, min_bytes: u64) -> std::io::Result<Selection> {
         .into_iter()
         .filter(|(_, size)| *size >= min_bytes)
         .max_by_key(|(_, size)| *size);
+    selection.image = images.into_iter().max_by_key(|(_, size)| *size);
     Ok(selection)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn disc_folders_are_units_not_videos() {
+        let tmp = tempfile::tempdir().unwrap();
+        let rel = tmp.path().join("Movie.2010.BluRay");
+        std::fs::create_dir_all(rel.join("BDMV/STREAM")).unwrap();
+        std::fs::write(rel.join("BDMV/index.bdmv"), b"x").unwrap();
+        std::fs::write(rel.join("BDMV/STREAM/00001.m2ts"), vec![0u8; 4096]).unwrap();
+        let sel = select(tmp.path(), 1).unwrap();
+        assert!(sel.main.is_none());
+        assert_eq!(sel.disc_folders, vec![rel]);
+    }
 
     #[test]
     fn classifies_names() {
