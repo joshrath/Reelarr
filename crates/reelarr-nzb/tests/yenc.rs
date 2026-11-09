@@ -691,3 +691,36 @@ fn existing_symlink_is_never_followed_or_overwritten() {
         .unwrap();
     assert_eq!(fs::read(a.finish().unwrap().path()).unwrap(), b"safe");
 }
+
+#[test]
+fn keep_partial_preserves_written_ranges_and_lists_holes() {
+    let dir = Dir::new();
+    let mut a = assembler(&dir, 2);
+    let first = encode(
+        b"AAAA",
+        "payload.bin",
+        Some((1, 2, 0, 8)),
+        None,
+        "\r\n",
+        true,
+        false,
+    );
+    a.add_part(1, first.as_slice(), BodyEncoding::DotStuffed)
+        .unwrap();
+    let partial = a.keep_partial().unwrap().unwrap();
+    assert_eq!(partial.file_size, 8);
+    assert_eq!(partial.missing, vec![4..8]);
+    let bytes = fs::read(&partial.path).unwrap();
+    assert_eq!(bytes.len(), 8);
+    assert_eq!(&bytes[..4], b"AAAA");
+    assert_eq!(&bytes[4..], &[0, 0, 0, 0]);
+    // The private directory is kept for the caller to clean up.
+    assert!(partial.path.parent().unwrap().exists());
+}
+
+#[test]
+fn keep_partial_is_none_when_no_part_was_written() {
+    let dir = Dir::new();
+    let a = assembler(&dir, 1);
+    assert!(a.keep_partial().unwrap().is_none());
+}

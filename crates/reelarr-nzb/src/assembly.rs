@@ -21,6 +21,7 @@ use std::{
     collections::{BTreeMap, BTreeSet},
     fs::{self, File, OpenOptions},
     io::{Read, Seek, SeekFrom, Write},
+    ops::Range,
     path::{Path, PathBuf},
     sync::atomic::{AtomicU64, Ordering},
 };
@@ -277,6 +278,50 @@ impl Assembler {
         Ok(result)
     }
 }
+impl Assembler {
+    /// Keep an incomplete file for later PAR2 repair instead of deleting it.
+    /// The file is sized to its declared length; byte ranges never written are
+    /// zero (sparse where the filesystem allows) and listed in
+    /// [`PartialFile::missing`]. Written ranges hold validated part bytes, but
+    /// the whole file has no CRC guarantee. `None` when no part was written.
+    pub fn keep_partial(mut self) -> Result<Option<PartialFile>, AssemblyError> {
+        let (Some(info), Some(output)) = (self.info.clone(), self.output.as_mut()) else {
+            return Ok(None);
+        };
+        output.set_len(info.file_size)?;
+        output.sync_all()?;
+        let mut missing = Vec::new();
+        let mut cursor = 0;
+        for (&start, &end) in &self.ranges {
+            if start > cursor {
+                missing.push(cursor..start);
+            }
+            cursor = cursor.max(end);
+        }
+        if cursor < info.file_size {
+            missing.push(cursor..info.file_size);
+        }
+        self.keep = true;
+        Ok(Some(PartialFile {
+            path: self.dir.join(&info.name),
+            file_size: info.file_size,
+            missing,
+        }))
+    }
+}
+
+/// An incomplete file kept by [`Assembler::keep_partial`]. The caller owns the
+/// file and its private directory and must move or remove them.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PartialFile {
+    /// File inside the assembler's private directory.
+    pub path: PathBuf,
+    /// Declared whole-file size (the file's length on disk).
+    pub file_size: u64,
+    /// Zero-filled ranges that were never written, ascending.
+    pub missing: Vec<Range<u64>>,
+}
+
 struct Stage(PathBuf);
 impl Drop for Stage {
     fn drop(&mut self) {

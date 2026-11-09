@@ -2643,6 +2643,7 @@ dependencies = [
  "quick-xml",
  "rcgen",
  "reelarr-core",
+ "reelarr-par2",
  "reelarr-rar",
  "reelarr-types",
  "rustls",
@@ -2653,6 +2654,17 @@ dependencies = [
  "tokio-rustls",
  "tracing",
  "tracing-subscriber",
+]
+
+[[package]]
+name = "reelarr-par2"
+version = "0.0.1"
+dependencies = [
+ "cap-std",
+ "crc32fast",
+ "md-5",
+ "tempfile",
+ "thiserror 2.0.21",
 ]
 
 [[package]]

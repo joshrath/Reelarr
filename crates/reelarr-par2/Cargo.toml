@@ -1,0 +1,18 @@
+[package]
+name = "reelarr-par2"
+description = "Clean-room PAR2 2.0 verification (no repair) for Reelarr downloads"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+cap-std = "4.0.3"
+crc32fast = "1.5"
+md-5 = "0.10"
+thiserror = "2"
+
+[dev-dependencies]
+crc32fast = "1.5"
+md-5 = "0.10"
+tempfile.workspace = true
