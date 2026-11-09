@@ -52,10 +52,11 @@ exhaustion returns SequenceExhausted rather than wrapping.
 
 ## Startup artifact registration
 
-Core Job intentionally contains no executor output path. Once an executor knows
-its **actual local artifact path**, it calls
+Core Job intentionally contains no executor output path. Once the executor reports
+its **actual local artifact path**, the server/queue coordinator calls
 `SqliteJobStore::set_recovery_path(job_id, Some(path))` (an absolute UTF-8 path).
-This is durable executor metadata, not a segment/progress checkpoint. Startup
+This is durable executor metadata, not a segment/progress checkpoint. The NZB
+crate itself does not depend on the database adapter. Startup
 checks the registered file or nonempty directory; missing/unregistered/empty paths
 conservatively requeue Verifying/Repairing/Extracting. Existing artifacts retain
 their own stage. Paths are never guessed from titles or deleted. NZB executors

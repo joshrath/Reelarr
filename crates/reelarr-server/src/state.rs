@@ -1,13 +1,16 @@
 use reelarr_core::auth::{AuthService, InMemoryAuthService};
 use reelarr_db::{Database, SqliteJobStore};
+use reelarr_stream::{InMemoryMediaLookup, MediaLookup};
 use std::sync::Arc;
 
-/// Shared application state; clones share the database pool, durable job store and auth service.
+/// Shared application state; clones share database, jobs, authentication and media lookup services.
 #[derive(Clone)]
 pub struct AppState {
     pub db: Database,
     pub jobs: Arc<SqliteJobStore>,
     pub auth: Arc<dyn AuthService>,
+    /// Finds media files for playback.
+    pub media: Arc<dyn MediaLookup>,
 }
 
 impl AppState {
@@ -16,6 +19,7 @@ impl AppState {
             jobs: Arc::new(SqliteJobStore::new(&db)),
             db,
             auth: Arc::new(InMemoryAuthService::default()),
+            media: Arc::new(InMemoryMediaLookup::new()),
         }
     }
 }
