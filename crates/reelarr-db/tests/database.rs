@@ -200,12 +200,15 @@ async fn jobs_rebuild_keeps_existing_rows_and_accepts_new_codes() {
         .unwrap();
     {
         let mut conn = pool.acquire().await.unwrap();
-        conn.ensure_migrations_table().await.unwrap();
-        for migration in sqlx::migrate!("./migrations").iter() {
+        let migrator = sqlx::migrate!("./migrations");
+        conn.ensure_migrations_table(&migrator.table_name)
+            .await
+            .unwrap();
+        for migration in migrator.iter() {
             if migration.version > 4 {
                 break;
             }
-            conn.apply(migration).await.unwrap();
+            conn.apply(&migrator.table_name, migration).await.unwrap();
         }
     }
 
