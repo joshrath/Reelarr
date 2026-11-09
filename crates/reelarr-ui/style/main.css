@@ -1312,3 +1312,298 @@ a { color: var(--color-primary); }
   .folder { display: grid; grid-template-columns: auto minmax(0, 1fr); }
   .folder .health-chip { grid-column: 2; justify-self: start; }
 }
+
+/* Special Order Counter: the clerk's desk, a search terminal, result slips
+   and the order-slip clipboard. */
+.counter { display: grid; grid-template-columns: minmax(0, 1fr); gap: var(--space-lg); }
+.counter p { margin: 0; }
+
+.counter-strip {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-sm);
+  padding: var(--space-sm) var(--space-md);
+  border-radius: var(--radius-sm);
+  background: var(--color-surface-container-lowest);
+  border-bottom: 1px solid color-mix(in srgb, var(--color-outline-variant) 30%, transparent);
+}
+.counter-strip-label { color: var(--color-outline-text); font: var(--type-label-sm); letter-spacing: var(--tracking-label-sm); }
+.counter-strip-chips { margin: 0; padding: 0; list-style: none; display: flex; flex-wrap: wrap; gap: var(--space-sm); }
+.counter-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-xs);
+  padding: 0.125rem var(--space-xs);
+  border-radius: var(--radius-sm);
+  background: var(--color-surface-container);
+  color: var(--color-primary);
+  font: var(--type-label-sm);
+  letter-spacing: var(--tracking-label-sm);
+  font-weight: 700;
+  text-transform: uppercase;
+}
+.counter-chip-warm { color: var(--color-tertiary-container); }
+
+.counter-desk {
+  display: grid;
+  gap: var(--space-md);
+  padding: var(--space-lg);
+  border-radius: var(--radius-sm);
+  background: var(--color-surface-container-low);
+  box-shadow: 0 20px 25px rgb(0 0 0 / 0.4);
+}
+.counter-desk-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-end;
+  justify-content: space-between;
+  gap: var(--space-md);
+}
+.counter-desk-title { display: grid; gap: var(--space-xs); }
+.counter-desk-title h1 { margin: 0; text-transform: uppercase; }
+.counter-overline {
+  display: flex;
+  align-items: center;
+  gap: var(--space-xs);
+  color: var(--color-primary);
+  font: var(--type-label-sm);
+  letter-spacing: 0.2em;
+}
+.counter-lede { max-width: 42rem; color: var(--color-on-surface-variant); }
+.counter-relay {
+  display: flex;
+  align-items: center;
+  gap: var(--space-md);
+  padding: var(--space-sm) var(--space-md);
+  border-radius: var(--radius-sm);
+  background: var(--color-surface-container-highest);
+  text-align: right;
+}
+.counter-relay > .icon { width: 1.875rem; height: 1.875rem; color: var(--color-primary); }
+.counter-relay-label { color: var(--color-outline-text); font: var(--type-label-sm); letter-spacing: var(--tracking-label-sm); }
+.counter-relay-value {
+  font: var(--type-headline-md);
+  letter-spacing: var(--tracking-headline-md);
+  text-transform: uppercase;
+  color: var(--color-primary);
+}
+
+/* The terminal: a sunken well holding the search field and format keys. */
+.counter-terminal {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-sm);
+  padding: var(--space-sm);
+  border-radius: var(--radius-sm);
+  background: var(--color-surface-container-lowest);
+  box-shadow: inset 0 2px 8px rgb(0 0 0 / 0.8);
+}
+.counter-search { flex: 1; display: flex; gap: var(--space-sm); min-width: 0; }
+.counter-field {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: var(--space-sm);
+  padding: var(--space-sm) var(--space-md);
+  border-radius: var(--radius-sm);
+  background: var(--color-surface-container);
+}
+.counter-field > .icon { width: 1.25rem; height: 1.25rem; color: var(--color-primary); }
+.counter-field:focus-within { outline: 2px solid var(--color-focus); outline-offset: 2px; }
+.counter-field input {
+  flex: 1;
+  min-width: 0;
+  padding: var(--space-xs) 0;
+  font: var(--type-label-md);
+  letter-spacing: var(--tracking-label-md);
+  color: var(--color-primary);
+  background: transparent;
+  border: 0;
+}
+.counter-field input:focus { outline: none; }
+.counter-field input::placeholder { color: var(--color-outline-text); text-transform: uppercase; opacity: 1; }
+.counter-field input::-webkit-search-cancel-button { display: none; }
+.counter-clear,
+.counter-format {
+  border: 0;
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  text-transform: uppercase;
+}
+.counter-clear {
+  padding: 0.125rem var(--space-xs);
+  font: var(--type-label-sm);
+  letter-spacing: var(--tracking-label-sm);
+  color: var(--color-outline-text);
+  background: var(--color-surface-container-high);
+}
+.counter-clear:hover { color: var(--color-on-surface); }
+.counter-submit { flex: none; }
+.counter-formats { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-xs); }
+.counter-format {
+  min-height: 2.5rem;
+  padding: var(--space-sm) var(--space-md);
+  font: var(--type-label-sm);
+  letter-spacing: var(--tracking-label-sm);
+  color: var(--color-on-surface-variant);
+  background: var(--color-surface-container-high);
+}
+.counter-format:hover { color: var(--color-on-surface); background: var(--color-surface-bright); }
+/* Pressed: filled, bold and ticked, so it's not colour alone. */
+.counter-format[aria-pressed="true"] {
+  font-weight: 700;
+  color: var(--color-on-primary-fill);
+  background: var(--color-primary-fill);
+}
+.counter-format[aria-pressed="true"]::before { content: "✓ "; }
+
+/* Results on the left, the clipboard on the right. */
+.counter-workspace { display: grid; grid-template-columns: minmax(0, 1fr); gap: var(--gutter-desktop); align-items: start; }
+.counter-results { display: grid; gap: var(--space-md); min-width: 0; }
+.counter-bar {
+  margin: 0;
+  display: flex;
+  align-items: center;
+  gap: var(--space-xs);
+  padding: var(--space-xs) var(--space-md);
+  border-radius: var(--radius-sm);
+  background: var(--color-surface-container);
+  color: var(--color-primary);
+  font: var(--type-label-md);
+  letter-spacing: var(--tracking-label-md);
+  text-transform: uppercase;
+}
+.counter-results-body { display: grid; gap: var(--space-md); }
+.counter-status {
+  padding: var(--space-md);
+  border-radius: var(--radius-sm);
+  background: var(--color-surface-container-low);
+  color: var(--color-primary);
+  font: var(--type-label-lg);
+  letter-spacing: var(--tracking-label-lg);
+  text-transform: uppercase;
+}
+
+.counter-slip {
+  display: flex;
+  gap: var(--space-md);
+  padding: var(--space-md);
+  border-radius: var(--radius-sm);
+  background: var(--color-surface-container-low);
+  box-shadow: 0 4px 6px rgb(0 0 0 / 0.3);
+}
+/* An empty case: dashed outline, no cover art. */
+.counter-slip-case {
+  flex: none;
+  width: 9rem;
+  aspect-ratio: 3 / 4;
+  display: grid;
+  place-items: center;
+  border: 2px dashed color-mix(in srgb, var(--color-outline-variant) 70%, transparent);
+  border-radius: var(--radius-sm);
+  background: var(--color-surface-container-lowest);
+  color: var(--color-outline);
+}
+.counter-slip-case .icon { width: 2.5rem; height: 2.5rem; }
+.counter-slip-body { flex: 1; min-width: 0; display: grid; align-content: start; gap: var(--space-sm); }
+.counter-badge {
+  justify-self: start;
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-xs);
+  padding: 0.125rem var(--space-sm);
+  border-radius: var(--radius-sm);
+  background: var(--color-surface-container-highest);
+  color: var(--color-on-surface);
+  font: var(--type-label-sm);
+  letter-spacing: var(--tracking-label-sm);
+  font-weight: 700;
+  text-transform: uppercase;
+}
+.counter-slip-title {
+  margin: 0;
+  font: var(--type-headline-lg);
+  letter-spacing: var(--tracking-headline-lg);
+  text-transform: uppercase;
+  overflow-wrap: anywhere;
+}
+.counter-slip-body > p:not(.counter-badge):not(.counter-actions) { color: var(--color-on-surface-variant); max-width: 42rem; }
+.counter-slip-alert { box-shadow: inset 4px 0 0 var(--color-secondary), 0 4px 6px rgb(0 0 0 / 0.3); }
+.counter-slip-alert .counter-badge { color: var(--color-secondary); }
+.counter-actions { display: flex; flex-wrap: wrap; gap: var(--space-sm); padding-top: var(--space-xs); }
+.counter-actions .button { text-decoration: none; }
+
+/* The clipboard, with a paper slip clipped to it. */
+.counter-clipboard {
+  display: grid;
+  gap: var(--space-md);
+  padding: var(--space-md);
+  border-radius: var(--radius-sm);
+  background: var(--color-surface-container-high);
+  box-shadow: 0 25px 50px rgb(0 0 0 / 0.5);
+}
+.counter-clipboard-head {
+  margin: 0;
+  display: flex;
+  align-items: center;
+  gap: var(--space-xs);
+  padding: var(--space-sm);
+  border-radius: var(--radius-sm);
+  background: var(--color-surface-container-highest);
+  box-shadow: 0 4px 6px rgb(0 0 0 / 0.3);
+  font: var(--type-label-md);
+  letter-spacing: var(--tracking-label-md);
+  font-weight: 700;
+  text-transform: uppercase;
+}
+.counter-clip { width: 0.75rem; height: 0.75rem; border-radius: 50%; background: var(--color-outline); }
+.counter-paper {
+  display: grid;
+  gap: var(--space-xs);
+  padding: var(--space-md);
+  border-radius: var(--radius-sm);
+  background: var(--color-tertiary);
+  color: var(--color-on-tertiary);
+  box-shadow: 0 4px 6px rgb(0 0 0 / 0.3);
+  transform: rotate(-1deg);
+}
+.counter-paper-title {
+  font: var(--type-headline-md);
+  letter-spacing: var(--tracking-headline-md);
+  text-transform: uppercase;
+}
+.counter-clipboard-link {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: var(--space-xs);
+  padding: var(--space-sm);
+  border-radius: var(--radius-sm);
+  background: var(--color-surface-container-lowest);
+  font: var(--type-label-md);
+  letter-spacing: var(--tracking-label-md);
+  font-weight: 700;
+  text-transform: uppercase;
+  text-decoration: none;
+}
+.counter-clipboard-link:hover { background: var(--color-surface-container); text-decoration: underline; }
+
+@media (min-width: 64rem) {
+  .counter-terminal { flex-direction: row; align-items: stretch; }
+}
+@media (min-width: 80rem) {
+  .counter-workspace { grid-template-columns: minmax(0, 8fr) minmax(0, 4fr); }
+}
+@media (max-width: 48rem) {
+  .counter-desk { padding: var(--space-md); }
+  .counter-relay { text-align: left; }
+  .counter-search { flex-wrap: wrap; }
+  .counter-submit { width: 100%; }
+  .counter-slip { flex-direction: column; }
+  .counter-slip-case { width: 100%; aspect-ratio: auto; height: 6rem; }
+}
+@media (forced-colors: active) {
+  .counter-format[aria-pressed="true"] { outline: 2px solid; }
+}
