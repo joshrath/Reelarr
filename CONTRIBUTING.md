@@ -56,7 +56,10 @@ The UI is written in Rust with [Leptos](https://leptos.dev). No React, and no Ja
 - Styles are plain CSS in `crates/reelarr-ui/style/main.css`, served as `/pkg/reelarr.css`. Its first section holds the design tokens (colours, type, spacing, radii, the 70s-wood theme and CRT scanlines); components use only those tokens. No Tailwind, no CSS build tools and no CDN links.
 - The look follows Josh's design (retro video store and record shop). Its palette names are kept as token names, e.g. `--color-surface-container-high`. Any colour changed for WCAG AA contrast is listed in the token comments.
 - Fonts are self-hosted from `crates/reelarr-ui/public/fonts` (served at `/fonts/`), and icons are inline SVG via `components::icon::Icon`. Third-party assets must allow redistribution and be listed in `THIRD_PARTY.md`. Don't commit third-party images or brand logos.
-- Routing: `/health` and `/api/v1/*` belong to the server. Leptos server functions, if added, go under `/api/v1/fn/`. Everything else falls back to the UI, except unknown `/api/*` paths, which return a JSON 404.
+- Routing: `/health` and `/api/v1/*` belong to the server. Everything else falls back to the UI, except unknown `/api/*` paths, which return a JSON 404.
+- Server functions: before adding the first `#[server]` function, give it `prefix = "/api/v1/fn"` and mount the server-function handler inside the server's `/api/v1` router so it sits behind the auth and CSRF layers. Don't rely on `leptos_routes`' default `/api` handler.
+- UI responses carry `Cache-Control` (`no-store` for pages, `no-cache` for `/pkg/*` and `/fonts/*`), `nosniff`, `Referrer-Policy: same-origin` and framing protection; see `security_headers` in `crates/reelarr-ui/src/server.rs`.
+- Configuration: the server listens on `REELARR_PORT` (default 7979); `LEPTOS_SITE_ADDR` is ignored. If any `LEPTOS_*` variable is set, the Leptos settings come from those variables and invalid values stop startup. With `LEPTOS_ENV=PROD`, a missing `site_root/pkg/reelarr.wasm` also stops startup.
 
 Run `cargo leptos watch` for a live-reloading dev server.
 

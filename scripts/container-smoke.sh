@@ -52,6 +52,7 @@ curl -fsS "http://127.0.0.1:$port/health" | python3 -c 'import json,sys; assert 
 curl -fsS "http://127.0.0.1:$port/" | grep -q 'aria-label="Main"'
 for asset in wasm js css; do curl -fsS -o /dev/null "http://127.0.0.1:$port/pkg/reelarr.$asset"; done
 curl -fsS -o /dev/null "http://127.0.0.1:$port/fonts/bebas-neue-400.woff2"
+curl -fsSI "http://127.0.0.1:$port/" | grep -qi '^x-content-type-options: nosniff'
 # docker exec's default user is the image/override user, not the server user.
 # Inspect the real server's kernel credentials to verify privilege dropping.
 docker exec "$name" sh -ec '
