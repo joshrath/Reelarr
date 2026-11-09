@@ -211,7 +211,16 @@ async fn jobs_rebuild_keeps_existing_rows_and_accepts_new_codes() {
 
     let seq = 1u64.to_be_bytes().to_vec();
     sqlx::query(
-        "INSERT INTO jobs (id, kind, state, title, priority, queue_position, category,          failure_code, failure_message, failure_retryable, attempts, resume_state,          resume_hint, created_at, updated_at, event_seq, seq_reserved, recovery_path)          VALUES          ('job-ok', 'nzb', 'completed', 'Done', 1, ?, NULL,           NULL, NULL, NULL, 1, NULL, NULL, 10, 10, ?, ?, NULL),          ('job-fail', 'nzb', 'failed', 'Full', 1, ?, NULL,           'disk_full', 'disk full', 1, 2, NULL, NULL, 11, 11, ?, ?, NULL)",
+        "INSERT INTO jobs (
+            id, kind, state, title, priority, queue_position, category,
+            failure_code, failure_message, failure_retryable, attempts,
+            resume_state, resume_hint, created_at, updated_at,
+            event_seq, seq_reserved, recovery_path
+         ) VALUES
+            ('job-ok', 'nzb', 'completed', 'Done', 1, ?, NULL,
+             NULL, NULL, NULL, 1, NULL, NULL, 10, 10, ?, ?, NULL),
+            ('job-fail', 'nzb', 'failed', 'Full', 1, ?, NULL,
+             'disk_full', 'disk full', 1, 2, NULL, NULL, 11, 11, ?, ?, NULL)",
     )
     .bind(&seq)
     .bind(&seq)
@@ -267,7 +276,15 @@ async fn jobs_rebuild_keeps_existing_rows_and_accepts_new_codes() {
     );
 
     sqlx::query(
-        "INSERT INTO jobs (id, kind, state, title, priority, queue_position, category,          failure_code, failure_message, failure_retryable, attempts, resume_state,          resume_hint, created_at, updated_at, event_seq, seq_reserved, recovery_path)          VALUES ('job-conflict', 'nzb', 'failed', 'Clash', 1, ?, NULL,          'destination_conflict', 'exists', 0, 1, NULL, NULL, 12, 12, ?, ?, NULL)",
+        "INSERT INTO jobs (
+            id, kind, state, title, priority, queue_position, category,
+            failure_code, failure_message, failure_retryable, attempts,
+            resume_state, resume_hint, created_at, updated_at,
+            event_seq, seq_reserved, recovery_path
+         ) VALUES (
+            'job-conflict', 'nzb', 'failed', 'Clash', 1, ?, NULL,
+            'destination_conflict', 'exists', 0, 1, NULL, NULL, 12, 12, ?, ?, NULL
+         )",
     )
     .bind(&seq)
     .bind(&seq)

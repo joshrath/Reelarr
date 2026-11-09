@@ -528,33 +528,40 @@ async fn crash_after_move_wrong_size_dest_is_a_conflict() {
 }
 
 #[tokio::test]
-async fn crash_after_move_missing_dest_is_terminal_and_clear() {
+async fn crash_after_move_onto_an_empty_mount_is_retryable() {
     let env = env().await;
     let root = env.root("library").await;
     let source = env.download(b"main feature bytes");
     let job = JobId::new();
     crashed_plan(&env, job, &root, &source, TransferMode::Move).await;
-    std::fs::remove_file(&source).unwrap();
+    let dest = dest_in(&root);
+    std::fs::rename(&source, &dest).unwrap();
+    // Another video still in the download folder must not be imported in
+    // place of the moved file.
+    std::fs::write(
+        source.parent().unwrap().join("other.mkv"),
+        b"another feature here",
+    )
+    .unwrap();
+    // An empty replacement mount looks Online when the library knows no
+    // files yet (known_files == 0), so dest NotFound must not fall through.
+    std::fs::remove_dir_all(&root.path).unwrap();
+    std::fs::create_dir_all(&root.path).unwrap();
 
     let result = env
         .handler(|o| o.mode = TransferMode::Move)
         .import(env.completed(job))
         .await;
-    match result {
-        ImportResult::Failed {
-            reason,
-            retryable,
-            code,
-        } => {
-            assert!(!retryable);
-            assert_eq!(code, None);
-            assert!(
-                reason.contains("gone") && !reason.contains("no importable video file"),
-                "{reason}"
-            );
-        }
-        other => panic!("expected Failed, got {other:?}"),
-    }
+    assert_eq!(failed(result), (true, Some(FailureCode::RootOffline)));
+    let entry = SqliteImportLedger::new(&env.db)
+        .get(&job.to_string())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(entry.state, LedgerState::Pending);
+    assert_eq!(entry.dest_path, dest.to_string_lossy());
+    assert!(entry.media_file_id.is_none());
+    assert_eq!(env.file_count().await, 0);
 }
 
 #[tokio::test]

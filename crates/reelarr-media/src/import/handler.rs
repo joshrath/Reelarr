@@ -6,8 +6,9 @@
 //!
 //! - done: the same `Imported` result again,
 //! - pending and the destination is ours: finish recording it,
-//! - pending and the destination is missing: transfer again, unless this
-//!   was a move and the source is also gone (the data is lost),
+//! - pending move with the source gone: dest missing or unreadable is
+//!   retryable RootOffline (an empty mount can look healthy); never fall
+//!   through to prepare,
 //! - the destination exists and is not ours: a terminal conflict.
 //!
 //! The library root is the movie's existing root, else the configured
@@ -110,16 +111,19 @@ impl<P: Prober, R: ReleaseMatcher> MediaImportHandler<P, R> {
                 return Ok(ImportResult::Imported { media_file_id: id });
             }
             // A move that finished before the crash leaves no source for
-            // `prepare` to find, so finish it from the ledger alone. Health
-            // is checked before reading the destination. Wrong-size dest is
-            // a conflict; a missing dest is a clear terminal loss; any other
-            // read error on a healthy root is retryable RootOffline.
+            // `prepare` to find, so finish it from the ledger alone and never
+            // fall through: prepare cannot recover a finished move, and
+            // another video still in the download folder must not overwrite
+            // the plan. Health is checked first, but an empty or fake mount
+            // with no known files still looks Online, so dest NotFound or
+            // unreadable is retryable RootOffline rather than "data lost".
+            // Wrong-size dest (or a non-file) is a permanent conflict.
             if entry.mode == TransferMode::Move && !exists(Path::new(&entry.source_path)).await {
                 let dest = PathBuf::from(&entry.dest_path);
                 let root = self.root(entry.root_id).await?;
                 self.check_health(&root).await?;
                 match tokio::fs::metadata(&dest).await {
-                    Ok(meta) if meta.len() == entry.size_bytes => {
+                    Ok(meta) if meta.is_file() && meta.len() == entry.size_bytes => {
                         ensure_dest_inside(&root, &dest).await?;
                         let _ = tokio::fs::remove_file(partial_path(&dest)).await;
                         let probe = if entry.kind.is_disc() {
@@ -141,19 +145,12 @@ impl<P: Prober, R: ReleaseMatcher> MediaImportHandler<P, R> {
                         ))
                         .with_code(FailureCode::DestinationConflict));
                     }
-                    Err(e) if e.kind() != std::io::ErrorKind::NotFound => {
+                    Err(e) => {
                         return Err(Failure::retryable(format!(
                             "library folder {} is unavailable: {e}",
                             root.path
                         ))
                         .with_code(FailureCode::RootOffline));
-                    }
-                    Err(_) => {
-                        return Err(Failure::permanent(format!(
-                            "the import was moved to {} but that file is gone, and the source is no longer at {}",
-                            dest.display(),
-                            entry.source_path
-                        )));
                     }
                 }
             }
