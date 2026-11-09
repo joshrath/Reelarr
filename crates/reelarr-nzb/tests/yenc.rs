@@ -754,3 +754,21 @@ fn finish_crc_mismatch_keeps_written_bytes() {
     assert!(partial.missing.is_empty());
     assert_eq!(fs::read(&partial.path).unwrap(), b"abcabc");
 }
+
+#[test]
+fn finish_incomplete_coverage_keeps_written_bytes() {
+    let dir = Dir::new();
+    let mut a = assembler(&dir, 2);
+    a.add_part(
+        1,
+        encode(b"abc", "x", Some((1, 2, 0, 6)), None, "\n", false, false).as_slice(),
+        BodyEncoding::Unstuffed,
+    )
+    .unwrap();
+    let Err(Some(partial)) = a.finish_or_partial().unwrap() else {
+        panic!("expected a kept partial");
+    };
+    assert_eq!(partial.file_size, 6);
+    assert_eq!(partial.missing, vec![3..6]);
+    assert_eq!(fs::read(&partial.path).unwrap(), b"abc\0\0\0");
+}
