@@ -7,9 +7,14 @@ use std::{
 };
 
 use sqlx::{
-    SqlitePool,
+    ConnectOptions, SqlitePool,
     sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions},
 };
+
+mod indexers;
+pub use indexers::{IndexerSummary, SqliteIndexerStore};
+
+pub mod secrets;
 
 mod jobs;
 pub use jobs::SqliteJobStore;
@@ -61,7 +66,8 @@ impl Database {
             .create_if_missing(true)
             .journal_mode(SqliteJournalMode::Wal)
             .foreign_keys(true)
-            .busy_timeout(Duration::from_secs(5));
+            .busy_timeout(Duration::from_secs(5))
+            .disable_statement_logging();
         let pool_options = if is_in_memory_sqlite(path) {
             SqlitePoolOptions::new()
                 .max_connections(1)

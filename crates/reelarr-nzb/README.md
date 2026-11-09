@@ -199,7 +199,7 @@ left to `reelarr_core::jobs::run_import`; register `NzbWorker::cleanup()` for
 `DownloadSource::BuiltinNzb` so staging and the published folder are removed
 after a successful import. `enqueue` parses an NZB, stores it with the grab's `movie_id`, then creates its job (the NZB is stored first and removed if the job insert fails, so no runnable job exists without its NZB). The completed download carries that `movie_id`.
 
-Staging lives in `staging_root/<job id>/files/<file index>/<name>`. A file is moved
+Staging lives in `staging_root/<job id>/files/<file index>/<name>`. Damaged files keep their validated bytes under `partial/<file index>/<name>` so a later repair has the good blocks. `Par2Verify` checks the downloaded files (and those partials) against the release's PAR2 index and reports how many recovery blocks repair would need versus how many the release posted; until #38 the job still fails with `Repair unavailable`. A file is moved
 there only after the assembler verified and fsynced it, and its segments are
 checkpointed only after that move is durable. Fully checkpointed files that are
 present on disk are reused after pause, restart or re-queue; everything else for

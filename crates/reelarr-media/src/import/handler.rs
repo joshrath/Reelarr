@@ -6,7 +6,9 @@
 //!
 //! - done: the same `Imported` result again,
 //! - pending and the destination is ours: finish recording it,
-//! - pending and the destination is missing: transfer again,
+//! - pending move with the source gone: dest missing or unreadable is
+//!   retryable RootOffline (an empty mount can look healthy); never fall
+//!   through to prepare,
 //! - the destination exists and is not ours: a terminal conflict.
 //!
 //! The library root is the movie's existing root, else the configured
@@ -109,25 +111,48 @@ impl<P: Prober, R: ReleaseMatcher> MediaImportHandler<P, R> {
                 return Ok(ImportResult::Imported { media_file_id: id });
             }
             // A move that finished before the crash leaves no source for
-            // `prepare` to find, so finish it from the ledger alone.
-            if entry.mode == TransferMode::Move
-                && !exists(Path::new(&entry.source_path)).await
-                && size_of(Path::new(&entry.dest_path)).await == Some(entry.size_bytes)
-            {
+            // `prepare` to find, so finish it from the ledger alone and never
+            // fall through: prepare cannot recover a finished move, and
+            // another video still in the download folder must not overwrite
+            // the plan. Health is checked first, but an empty or fake mount
+            // with no known files still looks Online, so dest NotFound or
+            // unreadable is retryable RootOffline rather than "data lost".
+            // Wrong-size dest (or a non-file) is a permanent conflict.
+            if entry.mode == TransferMode::Move && !exists(Path::new(&entry.source_path)).await {
                 let dest = PathBuf::from(&entry.dest_path);
                 let root = self.root(entry.root_id).await?;
                 self.check_health(&root).await?;
-                let probe = if entry.kind.is_disc() {
-                    None
-                } else {
-                    self.importer.prober.probe(&dest).await.ok()
-                };
-                let id = self
-                    .importer
-                    .record_file(entry.movie_id, entry.root_id, &dest, entry.kind, probe)
-                    .await?;
-                self.ledger.mark_done(&job, id).await?;
-                return Ok(ImportResult::Imported { media_file_id: id });
+                match tokio::fs::metadata(&dest).await {
+                    Ok(meta) if meta.is_file() && meta.len() == entry.size_bytes => {
+                        ensure_dest_inside(&root, &dest).await?;
+                        let _ = tokio::fs::remove_file(partial_path(&dest)).await;
+                        let probe = if entry.kind.is_disc() {
+                            None
+                        } else {
+                            self.importer.prober.probe(&dest).await.ok()
+                        };
+                        let id = self
+                            .importer
+                            .record_file(entry.movie_id, entry.root_id, &dest, entry.kind, probe)
+                            .await?;
+                        self.ledger.mark_done(&job, id).await?;
+                        return Ok(ImportResult::Imported { media_file_id: id });
+                    }
+                    Ok(_) => {
+                        return Err(Failure::permanent(format!(
+                            "a different file already exists at {}",
+                            dest.display()
+                        ))
+                        .with_code(FailureCode::DestinationConflict));
+                    }
+                    Err(e) => {
+                        return Err(Failure::retryable(format!(
+                            "library folder {} is unavailable: {e}",
+                            root.path
+                        ))
+                        .with_code(FailureCode::RootOffline));
+                    }
+                }
             }
         }
 
@@ -146,15 +171,20 @@ impl<P: Prober, R: ReleaseMatcher> MediaImportHandler<P, R> {
         let planned = entry.filter(|e| {
             e.movie_id == prepared.movie.id && Path::new(&e.source_path) == prepared.source
         });
-        let (root, dest) = match planned {
-            Some(e) => (self.root(e.root_id).await?, PathBuf::from(e.dest_path)),
+        let (root, dest, resume) = match planned {
+            Some(e) => (
+                self.root(e.root_id).await?,
+                PathBuf::from(e.dest_path),
+                true,
+            ),
             None => {
                 let root = self.choose_root(prepared.movie.id).await?;
                 let dest = Path::new(&root.path).join(&prepared.rel_dest);
-                (root, dest)
+                (root, dest, false)
             }
         };
         self.check_health(&root).await?;
+        ensure_dest_inside(&root, &dest).await?;
 
         let size_bytes = tokio::fs::metadata(&prepared.source)
             .await
@@ -175,19 +205,25 @@ impl<P: Prober, R: ReleaseMatcher> MediaImportHandler<P, R> {
             })
             .await?;
 
-        self.place(&prepared, &dest, mode).await?;
+        if let Err(failure) = self.place(&prepared, &dest, mode, resume).await {
+            if failure.code == Some(FailureCode::DestinationConflict) {
+                let _ = self.ledger.delete(&job).await;
+            }
+            return Err(failure);
+        }
         let id = self.importer.record(&prepared, root.id, &dest).await?;
         self.ledger.mark_done(&job, id).await?;
         Ok(ImportResult::Imported { media_file_id: id })
     }
 
-    /// Gets the file to `dest`: transfers it, or accepts a destination our
-    /// own earlier attempt already wrote.
+    /// Gets the file to `dest`: transfers it, or, when resuming a pending
+    /// ledger row, accepts a destination our own earlier attempt already wrote.
     async fn place(
         &self,
         prepared: &Prepared,
         dest: &Path,
         mode: TransferMode,
+        resume: bool,
     ) -> Result<(), Failure> {
         let partial = partial_path(dest);
         let _ = tokio::fs::remove_file(&partial).await;
@@ -195,8 +231,10 @@ impl<P: Prober, R: ReleaseMatcher> MediaImportHandler<P, R> {
             self.importer.transfer_into(prepared, dest).await?;
             return Ok(());
         }
+        // Without a pending row, an identical file at the destination is
+        // still someone else's as far as this job is concerned.
         let (src, dst) = (prepared.source.clone(), dest.to_owned());
-        if !blocking(move || is_ours(&src, &dst)).await? {
+        if !resume || !blocking(move || is_ours(&src, &dst)).await? {
             return Err(Failure::permanent(format!(
                 "a different file already exists at {}",
                 dest.display()
@@ -213,8 +251,9 @@ impl<P: Prober, R: ReleaseMatcher> MediaImportHandler<P, R> {
 
     async fn root(&self, id: LibraryRootId) -> Result<LibraryRoot, Failure> {
         self.roots.get(id).await?.ok_or_else(|| {
-            Failure::permanent(format!("library folder {id:?} no longer exists"))
-                .with_code(FailureCode::NoDefaultRoot)
+            Failure::permanent(format!(
+                "the library folder used for this import no longer exists ({id:?})"
+            ))
         })
     }
 
@@ -244,15 +283,22 @@ impl<P: Prober, R: ReleaseMatcher> MediaImportHandler<P, R> {
                     .with_code(FailureCode::NoDefaultRoot)
             });
         }
-        if roots.len() == 1 {
-            return Ok(roots.into_iter().next().expect("one root"));
+        match roots.as_slice() {
+            [root] => Ok(root.clone()),
+            _ => Err(Failure::permanent(
+                "several library folders and none is set as the import default".into(),
+            )
+            .with_code(FailureCode::NoDefaultRoot)),
         }
-        Err(Failure::permanent(
-            "several library folders and none is set as the import default".into(),
-        )
-        .with_code(FailureCode::NoDefaultRoot))
     }
 
+    /// A root that fails its health check is always retryable
+    /// [`FailureCode::RootOffline`], including [`Checked::PermissionDenied`].
+    /// The share may come back with working permissions (an NFS export
+    /// remounted). That is distinct from a write the library refused
+    /// (`EROFS`/`EACCES`/`EPERM`), which is terminal
+    /// [`FailureCode::LibraryPermissionDenied`]: the share is reachable and
+    /// rejected the file.
     async fn check_health(&self, root: &LibraryRoot) -> Result<(), Failure> {
         let known = self
             .importer
@@ -297,12 +343,77 @@ impl<P: Prober + 'static, R: ReleaseMatcher + 'static> ImportHandler for MediaIm
     }
 }
 
-async fn exists(path: &Path) -> bool {
-    tokio::fs::symlink_metadata(path).await.is_ok()
+async fn ensure_dest_inside(root: &LibraryRoot, dest: &Path) -> Result<(), Failure> {
+    let root_path = PathBuf::from(&root.path);
+    let dest_buf = dest.to_owned();
+    let checked = dest_buf.clone();
+    match tokio::task::spawn_blocking(move || dest_stays_inside(&root_path, &dest_buf))
+        .await
+        .map_err(|e| Failure::retryable(format!("import task failed: {e}")))?
+    {
+        Ok(true) => Ok(()),
+        Ok(false) => Err(Failure::permanent(format!(
+            "import destination {} is outside library folder {}",
+            checked.display(),
+            root.path
+        ))),
+        Err(e) => Err(Failure::retryable(format!(
+            "cannot resolve destination {}: {e}",
+            checked.display()
+        ))
+        .with_code(FailureCode::RootOffline)),
+    }
 }
 
-async fn size_of(path: &Path) -> Option<u64> {
-    tokio::fs::metadata(path).await.ok().map(|m| m.len())
+/// True when every existing prefix of `dest` resolves inside `root`, and any
+/// not-yet-created suffix would stay there. A symlink inside the root that
+/// points outside is rejected. Only [`std::io::ErrorKind::NotFound`] means
+/// a prefix does not exist yet; other stat errors are returned so a hung
+/// share is not treated as a missing folder.
+fn dest_stays_inside(root: &Path, dest: &Path) -> std::io::Result<bool> {
+    use std::path::Component;
+    if dest
+        .components()
+        .any(|c| matches!(c, Component::ParentDir | Component::CurDir))
+    {
+        return Ok(false);
+    }
+    let root = root.canonicalize()?;
+    let mut prefix = dest;
+    loop {
+        match prefix.symlink_metadata() {
+            Ok(_) => break,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => match prefix.parent() {
+                Some(parent) if parent != prefix => prefix = parent,
+                _ => return Ok(false),
+            },
+            Err(e) => return Err(e),
+        }
+    }
+    let resolved = match prefix.canonicalize() {
+        Ok(path) => path,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+        Err(e) => return Err(e),
+    };
+    if resolved == root || resolved.starts_with(&root) {
+        return Ok(true);
+    }
+    if root.starts_with(&resolved) {
+        let Ok(root_rest) = root.strip_prefix(&resolved) else {
+            return Ok(false);
+        };
+        let Ok(dest_rest) = dest.strip_prefix(prefix) else {
+            return Ok(false);
+        };
+        let dest_comps: Vec<_> = dest_rest.components().collect();
+        let root_comps: Vec<_> = root_rest.components().collect();
+        return Ok(dest_comps.starts_with(&root_comps));
+    }
+    Ok(false)
+}
+
+async fn exists(path: &Path) -> bool {
+    tokio::fs::symlink_metadata(path).await.is_ok()
 }
 
 /// Whether `dest` is the transfer of `src`: the same inode (a hardlink), or
@@ -337,4 +448,27 @@ fn read_full(file: &mut std::fs::File, buf: &mut [u8]) -> std::io::Result<usize>
         }
     }
     Ok(filled)
+}
+
+#[cfg(test)]
+mod dest_inside_tests {
+    use super::dest_stays_inside;
+    use std::io::ErrorKind;
+
+    #[test]
+    fn a_file_in_the_path_is_an_error_not_a_missing_prefix() {
+        let tmp = tempfile::tempdir().unwrap();
+        let file = tmp.path().join("file");
+        std::fs::write(&file, b"x").unwrap();
+        let dest = file.join("nested").join("out.mkv");
+        let err = dest_stays_inside(tmp.path(), &dest).unwrap_err();
+        assert_ne!(err.kind(), ErrorKind::NotFound, "{err}");
+    }
+
+    #[test]
+    fn a_missing_suffix_inside_the_root_is_allowed() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dest = tmp.path().join("Movie").join("Movie.mkv");
+        assert!(dest_stays_inside(tmp.path(), &dest).unwrap());
+    }
 }

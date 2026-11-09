@@ -9,6 +9,7 @@ repository.workspace = true
 [dependencies]
 reelarr-core = { version = "0.0.1", path = "../reelarr-core" }
 reelarr-rar = { version = "0.0.1", path = "../reelarr-rar" }
+reelarr-par2 = { version = "0.0.1", path = "../reelarr-par2" }
 reelarr-types = { version = "0.0.1", path = "../reelarr-types" }
 async-trait.workspace = true
 quick-xml = "0.42"

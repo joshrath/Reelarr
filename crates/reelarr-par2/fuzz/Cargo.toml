@@ -1,0 +1,23 @@
+[package]
+name = "reelarr-par2-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2024"
+license = "GPL-3.0-or-later"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+reelarr-par2 = { version = "0.0.1", path = ".." }
+
+# Kept out of the main workspace: needs nightly and cargo-fuzz.
+[workspace]
+
+[[bin]]
+name = "packets"
+path = "fuzz_targets/packets.rs"
+test = false
+doc = false
+bench = false

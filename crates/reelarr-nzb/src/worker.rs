@@ -28,9 +28,13 @@
 //! yEnc part CRCs (and whole-file CRCs when the poster sent one) gate
 //! verification: when every file assembled cleanly, parity is not consulted and
 //! PAR2 recovery volumes are never downloaded. When something is missing or
-//! damaged the [`ParityBackend`] decides. Until Rust PAR2 support lands
-//! ([`NoParity`]), such jobs fail with [`FailureCode::RepairFailed`],
-//! `retryable: false`, and a message starting with [`REPAIR_UNAVAILABLE`], and
+//! damaged the [`ParityBackend`] decides. Damaged files are kept as zero-filled
+//! partials under `partial/<index>/` so a later repair has their good blocks.
+//! [`Par2Verify`] checks the downloaded files against the release's PAR2 index
+//! and reports how many recovery blocks repair would need versus how many the
+//! release posted. Until repair lands (#38) such jobs fail with
+//! [`FailureCode::RepairFailed`], `retryable: false`, and a message starting
+//! with [`REPAIR_UNAVAILABLE`] that says whether the release is repairable, and
 //! completed files stay on disk so a later re-queue reuses them.
 //!
 //! # Pause, cancel and restart
@@ -42,7 +46,7 @@
 use crate::{
     JobId, NzbDocument, NzbFile, NzbStore, ParseError, ParseLimits, Segment, SegmentKey,
     StoreError,
-    assembly::{Assembler, AssemblyError},
+    assembly::{Assembler, AssemblyError, PartialFile},
     nntp, parse,
     yenc::{BodyEncoding, DecodeLimits},
 };
@@ -73,6 +77,8 @@ pub const REPAIR_UNAVAILABLE: &str = "Repair unavailable";
 
 const FILES_DIR: &str = "files";
 const INPUTS_DIR: &str = "inputs";
+const PARTIAL_DIR: &str = "partial";
+const PAR2_VIEW: &str = ".reelarr-par2-view";
 const ASSEMBLY_PREFIX: &str = ".reelarr-assembly-";
 const RAR_PREFIX: &str = ".reelarr-rar-";
 const PUBLISH_PREFIX: &str = ".reelarr-publish-";
@@ -127,6 +133,38 @@ pub struct RepairRequest {
     /// Articles missing or rejected in this run (zero when re-entered after a
     /// restart, where only file-level damage is known).
     pub bad_articles: u32,
+    /// Damaged file indices kept as partials under `partial/<index>/`.
+    pub partial_files: Vec<usize>,
+    /// Recovery blocks the release posted, summed from volume names
+    /// (`name.vol07+08.par2` holds 8). Not yet downloaded.
+    pub posted_recovery_blocks: u64,
+}
+
+/// What a parity backend found when checking a damaged download.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ParityVerdict {
+    /// The backend can't verify.
+    Unavailable,
+    /// No usable PAR2 data among the downloaded files.
+    NoParityData,
+    /// PAR2 data lacks the description or checksums of some protected file.
+    Incomplete,
+    /// Every PAR2-protected file is intact; the damage is in unprotected files.
+    Valid,
+    /// Protected files need `needed` recovery blocks; `available` are on disk.
+    Damaged {
+        /// Recovery blocks needed.
+        needed: u64,
+        /// Recovery blocks already downloaded.
+        available: u64,
+    },
+    /// The run was cancelled during verification.
+    Cancelled,
+    /// Verification itself failed (I/O or a hostile-input budget).
+    Error {
+        /// Diagnostic, logged and not shown to users.
+        message: String,
+    },
 }
 
 /// Result of a repair attempt.
@@ -143,9 +181,15 @@ pub enum RepairOutcome {
 
 /// Pluggable PAR2 verification/repair (#74, #38).
 pub trait ParityBackend: Send + Sync {
-    /// Whether this backend can repair at all; when false the job fails from
+    /// Check the damaged download described by `request`. Reads only.
+    fn verify(
+        &self,
+        request: &RepairRequest,
+        cancel: &CancelToken,
+    ) -> impl Future<Output = ParityVerdict> + Send;
+    /// Whether this backend can repair; when false the job fails from
     /// `Verifying` without entering `Repairing`.
-    fn available(&self) -> bool;
+    fn can_repair(&self) -> bool;
     /// Repair the damaged files described by `request`.
     fn repair(&self, request: RepairRequest) -> impl Future<Output = RepairOutcome> + Send;
 }
@@ -153,13 +197,96 @@ pub trait ParityBackend: Send + Sync {
 #[derive(Clone, Copy, Debug, Default)]
 pub struct NoParity;
 impl ParityBackend for NoParity {
-    fn available(&self) -> bool {
+    async fn verify(&self, _: &RepairRequest, _: &CancelToken) -> ParityVerdict {
+        ParityVerdict::Unavailable
+    }
+    fn can_repair(&self) -> bool {
         false
     }
     async fn repair(&self, _: RepairRequest) -> RepairOutcome {
         RepairOutcome::Failed {
             message: "no repair backend".into(),
         }
+    }
+}
+
+/// Clean-room Rust PAR2 verification ([`reelarr_par2`]); no repair yet (#38).
+///
+/// Builds a flat hard-linked view of `files/` and `partial/` inside the job
+/// directory, verifies it read-only and removes the view again.
+#[derive(Clone, Debug, Default)]
+pub struct Par2Verify {
+    /// Hostile-input budgets for the PAR2 parser and verifier.
+    pub limits: reelarr_par2::Limits,
+}
+impl ParityBackend for Par2Verify {
+    async fn verify(&self, request: &RepairRequest, cancel: &CancelToken) -> ParityVerdict {
+        let (job_dir, limits, cancel) =
+            (request.job_dir.clone(), self.limits.clone(), cancel.clone());
+        tokio::task::spawn_blocking(move || par2_verify(&job_dir, &limits, cancel.flag()))
+            .await
+            .unwrap_or_else(|_| ParityVerdict::Error {
+                message: "verification task failed".into(),
+            })
+    }
+    fn can_repair(&self) -> bool {
+        false
+    }
+    async fn repair(&self, _: RepairRequest) -> RepairOutcome {
+        RepairOutcome::Failed {
+            message: "PAR2 repair is not supported yet".into(),
+        }
+    }
+}
+
+fn par2_verify(
+    job_dir: &Path,
+    limits: &reelarr_par2::Limits,
+    cancel: &AtomicBool,
+) -> ParityVerdict {
+    use reelarr_par2::Outcome as P;
+    let view = job_dir.join(PAR2_VIEW);
+    let result = (|| -> Result<ParityVerdict, reelarr_par2::Error> {
+        remove_all(&view)?;
+        create_private_dir(&view)?;
+        let mut names = BTreeSet::new();
+        // files/ first, then partial/. The view keeps the original basename so
+        // verify_dir can match FileDesc names. If two slots share a basename,
+        // the first wins (a completed file over a partial). Using index
+        // prefixes would break that name match, and a damaged first 16 KiB
+        // cannot fall back to the content hash either.
+        for root in [FILES_DIR, PARTIAL_DIR] {
+            let entries = match fs::read_dir(job_dir.join(root)) {
+                Err(e) if e.kind() == ErrorKind::NotFound => continue,
+                other => other?,
+            };
+            for slot in entries {
+                let Some(file) = single_file(&slot?.path())? else {
+                    continue;
+                };
+                let name = file.file_name().expect("file has a name").to_owned();
+                if names.insert(name.clone()) {
+                    link_or_copy(&file, &view.join(&name))?;
+                }
+            }
+        }
+        let report = reelarr_par2::verify_dir(&view, limits, cancel, &mut |_| {})?;
+        Ok(match report.primary().map(|s| s.outcome) {
+            None => ParityVerdict::NoParityData,
+            Some(P::Valid) => ParityVerdict::Valid,
+            Some(P::Incomplete) => ParityVerdict::Incomplete,
+            Some(P::Repairable { needed, available } | P::Insufficient { needed, available }) => {
+                ParityVerdict::Damaged { needed, available }
+            }
+        })
+    })();
+    let _ = remove_all(&view);
+    match result {
+        Ok(verdict) => verdict,
+        Err(reelarr_par2::Error::Cancelled) => ParityVerdict::Cancelled,
+        Err(e) => ParityVerdict::Error {
+            message: e.to_string(),
+        },
     }
 }
 
@@ -707,18 +834,39 @@ where
         }
         let asm = assembler.take().expect("assembler present");
         if bad > 0 {
-            discard_assembler(Some(asm)).await;
+            let dir = job_dir.to_owned();
+            match blocking(move || stash_partial(asm, &dir, index)).await? {
+                Ok(()) => {}
+                Err(e) => {
+                    tracing::warn!(job = %id, file = index, error = %e, "could not keep partial file")
+                }
+            }
             return Ok(FileResult::Damaged { bad_articles: bad });
         }
         let target = job_dir.join(FILES_DIR).join(index.to_string());
+        let stale = job_dir.join(PARTIAL_DIR).join(index.to_string());
+        let dir = job_dir.to_owned();
         let complete = run_blocking(move || -> Result<bool, Stop> {
-            match asm.finish() {
-                Ok(completed) => {
+            match asm.finish_or_partial() {
+                Ok(Ok(completed)) => {
                     publish_completed(completed.path(), &target)?;
+                    remove_all(&stale)?;
                     Ok(true)
                 }
+                Ok(Err(partial)) => {
+                    if let Some(partial) = partial
+                        && let Err(e) = stash_kept(partial, &dir, index)
+                    {
+                        tracing::warn!(
+                            job = %id,
+                            file = index,
+                            error = %e,
+                            "could not keep partial file after a CRC or coverage failure"
+                        );
+                    }
+                    Ok(false)
+                }
                 Err(e @ (AssemblyError::Io(_) | AssemblyError::Store(_))) => Err(e.into()),
-                // Whole-file CRC mismatch or incomplete coverage.
                 Err(_) => Ok(false),
             }
         })
@@ -774,8 +922,38 @@ where
             d.bad_articles
         });
         if !damaged.is_empty() {
-            let message = repair_unavailable_message(bad_articles, damaged.len(), wanted.len());
-            if !self.parity.available() {
+            let partial_files = {
+                let (dir, damaged) = (job_dir.clone(), damaged.clone());
+                run_blocking(move || present_partials(&dir, &damaged)).await?
+            };
+            let request = RepairRequest {
+                job_dir: job_dir.clone(),
+                damaged_files: damaged,
+                recovery_volumes: (0..document.files.len())
+                    .filter(|&i| is_recovery_volume(&document.files[i].subject))
+                    .collect(),
+                bad_articles,
+                partial_files,
+                posted_recovery_blocks: document
+                    .files
+                    .iter()
+                    .filter_map(|f| recovery_blocks(&f.subject))
+                    .fold(0u64, u64::saturating_add),
+            };
+            let verdict = self.parity.verify(&request, cancel).await;
+            let repairable = match &verdict {
+                ParityVerdict::Cancelled => return Err(Stop::Cancelled),
+                ParityVerdict::Error { message } => {
+                    tracing::warn!(job = %job.id, error = %message, "PAR2 verification failed");
+                    false
+                }
+                ParityVerdict::Damaged { needed, available } => {
+                    *needed <= available.saturating_add(request.posted_recovery_blocks)
+                }
+                _ => false,
+            };
+            if !(repairable && self.parity.can_repair()) {
+                let message = repair_message(&verdict, &request, wanted.len());
                 return Err(Stop::Fail(Failure {
                     code: FailureCode::RepairFailed,
                     message,
@@ -785,14 +963,6 @@ where
             if job.state != JobState::Repairing {
                 self.advance(job.id, JobState::Repairing, None).await?;
             }
-            let request = RepairRequest {
-                job_dir: job_dir.clone(),
-                damaged_files: damaged,
-                recovery_volumes: (0..document.files.len())
-                    .filter(|&i| is_recovery_volume(&document.files[i].subject))
-                    .collect(),
-                bad_articles,
-            };
             match self.parity.repair(request).await {
                 RepairOutcome::Repaired => {}
                 RepairOutcome::Failed { message } => {
@@ -1048,33 +1218,124 @@ fn extract_failure(message: &str) -> Stop {
     })
 }
 
-fn repair_unavailable_message(bad_articles: u32, damaged: usize, total: usize) -> String {
-    let articles = match bad_articles {
+fn repair_message(verdict: &ParityVerdict, request: &RepairRequest, total: usize) -> String {
+    let articles = match request.bad_articles {
         0 => String::new(),
         1 => " (1 article missing or damaged)".into(),
         n => format!(" ({n} articles missing or damaged)"),
     };
-    format!(
-        "{REPAIR_UNAVAILABLE}: {damaged} of {total} files are incomplete{articles}. \
-         Reelarr can't repair downloads yet, so try another release or retry this job \
-         once repair support lands. Completed files are kept and reused on retry"
-    )
+    let damaged = request.damaged_files.len();
+    let head =
+        format!("{REPAIR_UNAVAILABLE}: {damaged} of {total} files are incomplete{articles}.");
+    let kept = "Completed files are kept and reused on retry";
+    let blocks = |n: u64| match n {
+        1 => "1 recovery block".to_owned(),
+        n => format!("{n} recovery blocks"),
+    };
+    match verdict {
+        ParityVerdict::Damaged { needed, available } => {
+            let have = available.saturating_add(request.posted_recovery_blocks);
+            if *needed <= have {
+                format!(
+                    "{head} PAR2 says repair needs {} and the release has {have}, so it can be \
+                     repaired once Reelarr supports repair. Retry this job then, or try another \
+                     release. {kept}",
+                    blocks(*needed)
+                )
+            } else {
+                format!(
+                    "{head} PAR2 says repair needs {} but the release only has {have}, so it \
+                     can't be repaired. Try another release",
+                    blocks(*needed)
+                )
+            }
+        }
+        ParityVerdict::NoParityData => format!(
+            "{head} The release has no usable PAR2 data to check or repair it. Try another \
+             release. {kept}"
+        ),
+        ParityVerdict::Incomplete => format!(
+            "{head} The release's PAR2 data is incomplete, so the damage can't be measured. Try \
+             another release. {kept}"
+        ),
+        ParityVerdict::Valid => format!(
+            "{head} PAR2 reports the protected files intact, but Reelarr can't finish a release \
+             with incomplete unprotected files yet. Try another release or retry this job. {kept}"
+        ),
+        ParityVerdict::Unavailable | ParityVerdict::Cancelled | ParityVerdict::Error { .. } => {
+            format!(
+                "{head} Reelarr can't repair downloads yet, so try another release or retry this \
+                 job once repair support lands. {kept}"
+            )
+        }
+    }
+}
+
+/// Keep a damaged file's validated bytes under `partial/<index>/` for repair.
+fn stash_partial(asm: Assembler, job_dir: &Path, index: usize) -> io::Result<()> {
+    match asm.keep_partial() {
+        Ok(Some(partial)) => stash_kept(partial, job_dir, index),
+        Ok(None) => Ok(()),
+        Err(AssemblyError::Io(e)) => Err(e),
+        Err(e) => Err(io::Error::other(e.to_string())),
+    }
+}
+
+fn stash_kept(partial: PartialFile, job_dir: &Path, index: usize) -> io::Result<()> {
+    let slot = job_dir.join(PARTIAL_DIR).join(index.to_string());
+    remove_all(&slot)?;
+    let private = partial.path.parent().expect("assembly dir").to_owned();
+    let result = (|| {
+        create_private_dir(&slot)?;
+        let name = partial.path.file_name().expect("file has a name");
+        fs::rename(&partial.path, slot.join(name))?;
+        sync_dir(&slot)
+    })();
+    let _ = remove_all(&private);
+    result
+}
+
+/// Damaged files that have a kept partial.
+fn present_partials(dir: &Path, damaged: &[usize]) -> io::Result<Vec<usize>> {
+    let mut found = Vec::new();
+    for &i in damaged {
+        if single_file(&dir.join(PARTIAL_DIR).join(i.to_string()))?.is_some() {
+            found.push(i);
+        }
+    }
+    Ok(found)
 }
 
 /// PAR2 recovery volumes (`name.vol07+08.par2`) are only needed for repair,
 /// so they are not downloaded. The index `.par2` file is small and kept.
 fn is_recovery_volume(subject: &str) -> bool {
+    recovery_blocks(subject).is_some()
+}
+/// Recovery blocks a volume holds, from its name: `vol07+08` holds 8. The
+/// rarer `vol07-08` spelling is recognised but counted as 0.
+fn recovery_blocks(subject: &str) -> Option<u64> {
     let lower = subject.to_ascii_lowercase();
-    lower.match_indices(".vol").any(|(i, _)| {
+    lower.match_indices(".vol").find_map(|(i, _)| {
         let rest = &lower.as_bytes()[i + 4..];
         let digits = |b: &[u8]| b.iter().take_while(|c| c.is_ascii_digit()).count();
         let a = digits(rest);
-        if a == 0 || !matches!(rest.get(a), Some(b'+' | b'-')) {
-            return false;
+        let sep = *rest.get(a)?;
+        if a == 0 || !matches!(sep, b'+' | b'-') {
+            return None;
         }
         let rest = &rest[a + 1..];
         let b = digits(rest);
-        b > 0 && rest[b..].starts_with(b".par2")
+        if b == 0 || !rest[b..].starts_with(b".par2") {
+            return None;
+        }
+        if sep == b'-' {
+            return Some(0);
+        }
+        std::str::from_utf8(&rest[..b])
+            .ok()?
+            .parse()
+            .ok()
+            .or(Some(u64::MAX))
     })
 }
 
@@ -1140,7 +1401,11 @@ fn prepare_job_dir(dir: &Path, complete: &[usize]) -> io::Result<BTreeSet<usize>
         let entry = entry?;
         let name = entry.file_name();
         let name = name.to_string_lossy();
-        if name.starts_with(ASSEMBLY_PREFIX) || name.starts_with(RAR_PREFIX) || name == INPUTS_DIR {
+        if name.starts_with(ASSEMBLY_PREFIX)
+            || name.starts_with(RAR_PREFIX)
+            || name == INPUTS_DIR
+            || name == PAR2_VIEW
+        {
             remove_all(&entry.path())?;
         }
     }
@@ -1518,11 +1783,47 @@ mod tests {
         assert_eq!(old_style_continuation("a.r0x"), None);
         assert_eq!(old_style_continuation("a.r+1"), None);
     }
+    fn request(bad_articles: u32, damaged: usize, posted: u64) -> RepairRequest {
+        RepairRequest {
+            job_dir: PathBuf::new(),
+            damaged_files: (0..damaged).collect(),
+            recovery_volumes: Vec::new(),
+            bad_articles,
+            partial_files: Vec::new(),
+            posted_recovery_blocks: posted,
+        }
+    }
     #[test]
     fn repair_message_is_actionable() {
-        let m = repair_unavailable_message(3, 1, 4);
+        let m = repair_message(
+            &ParityVerdict::Damaged {
+                needed: 2,
+                available: 0,
+            },
+            &request(3, 1, 4),
+            4,
+        );
         assert!(m.starts_with("Repair unavailable: 1 of 4 files are incomplete (3 articles"));
-        assert!(repair_unavailable_message(0, 2, 2).contains("2 of 2 files are incomplete. "));
+        assert!(m.contains("needs 2 recovery blocks and the release has 4"));
+        let insufficient = repair_message(
+            &ParityVerdict::Damaged {
+                needed: 5,
+                available: 0,
+            },
+            &request(0, 2, 1),
+            2,
+        );
+        assert!(insufficient.contains("2 of 2 files are incomplete. "));
+        assert!(insufficient.contains("needs 5 recovery blocks but the release only has 1"));
+        let none = repair_message(&ParityVerdict::Unavailable, &request(0, 1, 0), 1);
+        assert!(none.contains("can't repair downloads yet"));
+    }
+    #[test]
+    fn recovery_volume_block_counts() {
+        assert_eq!(recovery_blocks("Movie.vol07+08.par2"), Some(8));
+        assert_eq!(recovery_blocks("Movie.vol00+01.par2"), Some(1));
+        assert_eq!(recovery_blocks("Movie.vol07-08.par2"), Some(0));
+        assert_eq!(recovery_blocks("Movie.par2"), None);
     }
     #[tokio::test]
     async fn cancel_token_wakes_waiters() {
