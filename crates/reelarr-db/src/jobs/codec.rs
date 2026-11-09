@@ -36,7 +36,9 @@ enum_codec!(FailureCode, code, parse_code, {
     MissingArticles => "missing_articles", RepairFailed => "repair_failed", ExtractFailed => "extract_failed",
     PasswordRequired => "password_required", DiskFull => "disk_full", ServerAuth => "server_auth",
     InvalidNzb => "invalid_nzb", Duplicate => "duplicate", NoMatch => "no_match",
-    PathUnmapped => "path_unmapped", Other => "other"
+    PathUnmapped => "path_unmapped", RootOffline => "root_offline",
+    LibraryPermissionDenied => "library_permission_denied", NoDefaultRoot => "no_default_root",
+    DestinationConflict => "destination_conflict", Other => "other"
 });
 enum_codec!(CompletedStage, hint, parse_hint, {
     Downloading => "downloading", Verifying => "verifying", Repairing => "repairing", Extracting => "extracting"

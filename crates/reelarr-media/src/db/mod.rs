@@ -5,11 +5,13 @@
 //! crate.
 
 mod files;
+mod ledger;
 mod lookup;
 mod movies;
 mod roots;
 
 pub use files::SqliteMediaFileStore;
+pub use ledger::{LedgerEntry, LedgerState, SqliteImportLedger};
 pub use lookup::DbMediaLookup;
 pub use movies::SqliteMovieStore;
 pub use roots::{RootError, SqliteLibraryRootStore};

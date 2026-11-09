@@ -115,7 +115,7 @@ pub fn safe_copy(src: &Path, dest: &Path) -> io::Result<()> {
     result
 }
 
-fn partial_path(dest: &Path) -> PathBuf {
+pub(crate) fn partial_path(dest: &Path) -> PathBuf {
     let mut name = dest.file_name().unwrap_or_default().to_os_string();
     name.push(PARTIAL_SUFFIX);
     dest.with_file_name(name)
