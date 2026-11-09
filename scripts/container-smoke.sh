@@ -5,12 +5,13 @@ image=${1:-reelarr:ci}
 suffix="$$-$RANDOM"
 name="reelarr-smoke-$suffix"
 volume="$name-config"
+media_volume="$name-media"
 work=$(mktemp -d)
 cleanup() {
     status=$?
     if (( status != 0 )); then docker logs "$name" >&2 || true; fi
-    docker rm -f "$name" "$name-default" "$name-bad" >/dev/null 2>&1 || true
-    docker volume rm "$volume" >/dev/null 2>&1 || true
+    docker rm -fv "$name" "$name-default" "$name-bad" >/dev/null 2>&1 || true
+    docker volume rm "$volume" "$media_volume" >/dev/null 2>&1 || true
     rm -rf "$work"
     exit "$status"
 }
@@ -32,14 +33,19 @@ wait_healthy() {
 }
 wait_healthy "$name-default"
 docker exec "$name-default" sh -ec 'test "$(id -u):$(id -g)" = 1000:1000; test -w /config; test -s /config/reelarr.db'
-docker rm -f "$name-default"
+docker rm -fv "$name-default"
 
 docker volume create "$volume" >/dev/null
+docker volume create "$media_volume" >/dev/null
+# Simulate a pre-existing NAS-owned library, mounted read-only. Bootstrap must
+# neither chown it nor require write access to adopt/read existing files.
+docker run --rm --user 0:0 --entrypoint sh -v "$media_volume:/media" "$image" -ec \
+    'printf existing-movie > /media/existing.mkv; chown 23456:23457 /media/existing.mkv; chmod 640 /media/existing.mkv'
 # A fresh root-owned volume tests bootstrap's ownership repair. Use a nondefault
 # port to exercise the Rust probe's environment handling, without host collisions.
 docker run -d --name "$name" --user 0:0 \
     -e PUID="$uid" -e PGID="$gid" -e REELARR_PORT=7987 \
-    -v "$volume:/config" -p 127.0.0.1::7987 "$image"
+    -v "$volume:/config" -v "$media_volume:/media:ro" -p 127.0.0.1::7987 "$image"
 wait_healthy "$name"
 port=$(docker inspect -f '{{(index (index .NetworkSettings.Ports "7987/tcp") 0).HostPort}}' "$name")
 curl -fsS "http://127.0.0.1:$port/health" | python3 -c 'import json,sys; assert json.load(sys.stdin)["status"] == "ok"'
@@ -59,7 +65,7 @@ docker exec "$name" sh -ec '
     test "$(stat -c %u:%g /config/reelarr.db)" = 23456:23457
     /usr/local/share/reelarr/check-runtime.sh
 '
-docker exec --user "$uid:$gid" "$name" sh -ec 'test -w /config; ffmpeg -version; ffprobe -version'
+docker exec --user "$uid:$gid" "$name" sh -ec 'test -w /config; test "$(stat -c %u:%g /media/existing.mkv)" = 23456:23457; test "$(cat /media/existing.mkv)" = existing-movie; ffmpeg -version; ffprobe -version'
 # Persist real SQLite data, not just a marker file. Stop before copying all WAL files;
 # use the same non-root UID for the write through an ephemeral volume helper.
 docker stop "$name" >/dev/null
