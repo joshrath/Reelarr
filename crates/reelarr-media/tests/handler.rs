@@ -316,10 +316,9 @@ async fn someone_elses_file_at_the_destination_is_a_terminal_conflict() {
     std::fs::create_dir_all(dest_in(&root).parent().unwrap()).unwrap();
     std::fs::write(dest_in(&root), b"a different movie!").unwrap();
 
-    let result = env
-        .handler(|_| {})
-        .import(env.completed(JobId::new()))
-        .await;
+    let job = JobId::new();
+    let handler = env.handler(|_| {});
+    let result = handler.import(env.completed(job)).await;
     assert_eq!(
         failed(result),
         (false, Some(FailureCode::DestinationConflict))
@@ -327,6 +326,24 @@ async fn someone_elses_file_at_the_destination_is_a_terminal_conflict() {
     assert_eq!(
         std::fs::read(dest_in(&root)).unwrap(),
         b"a different movie!"
+    );
+    assert!(source.exists());
+    assert!(
+        SqliteImportLedger::new(&env.db)
+            .get(&job.to_string())
+            .await
+            .unwrap()
+            .is_none(),
+        "a conflict must not leave a pending row pointing at someone else's file"
+    );
+
+    // Even if dest later matches the source bytes, retry must not adopt it
+    // or delete the source.
+    std::fs::write(dest_in(&root), b"main feature bytes").unwrap();
+    let result = handler.import(env.completed(job)).await;
+    assert_eq!(
+        failed(result),
+        (false, Some(FailureCode::DestinationConflict))
     );
     assert!(source.exists());
 }
@@ -488,4 +505,78 @@ async fn a_reused_ledger_destination_outside_the_root_is_rejected() {
     let (retryable, _) = failed(result);
     assert!(!retryable);
     assert!(!stolen.exists());
+}
+
+#[tokio::test]
+async fn crash_after_move_wrong_size_dest_is_a_conflict() {
+    let env = env().await;
+    let root = env.root("library").await;
+    let source = env.download(b"main feature bytes");
+    let job = JobId::new();
+    crashed_plan(&env, job, &root, &source, TransferMode::Move).await;
+    std::fs::remove_file(&source).unwrap();
+    std::fs::write(dest_in(&root), b"someone else's file").unwrap();
+
+    let result = env
+        .handler(|o| o.mode = TransferMode::Move)
+        .import(env.completed(job))
+        .await;
+    assert_eq!(
+        failed(result),
+        (false, Some(FailureCode::DestinationConflict))
+    );
+}
+
+#[tokio::test]
+async fn crash_after_move_missing_dest_is_terminal_and_clear() {
+    let env = env().await;
+    let root = env.root("library").await;
+    let source = env.download(b"main feature bytes");
+    let job = JobId::new();
+    crashed_plan(&env, job, &root, &source, TransferMode::Move).await;
+    std::fs::remove_file(&source).unwrap();
+
+    let result = env
+        .handler(|o| o.mode = TransferMode::Move)
+        .import(env.completed(job))
+        .await;
+    match result {
+        ImportResult::Failed {
+            reason,
+            retryable,
+            code,
+        } => {
+            assert!(!retryable);
+            assert_eq!(code, None);
+            assert!(
+                reason.contains("gone") && !reason.contains("no importable video file"),
+                "{reason}"
+            );
+        }
+        other => panic!("expected Failed, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn crash_after_move_unreadable_dest_on_a_healthy_root_is_retryable() {
+    let env = env().await;
+    let root = env.root("library").await;
+    let source = env.download(b"main feature bytes");
+    let job = JobId::new();
+    crashed_plan(&env, job, &root, &source, TransferMode::Move).await;
+    std::fs::remove_file(&source).unwrap();
+    let dest = dest_in(&root);
+    std::os::unix::fs::symlink(&dest, &dest).unwrap();
+
+    let result = env
+        .handler(|o| o.mode = TransferMode::Move)
+        .import(env.completed(job))
+        .await;
+    assert_eq!(failed(result), (true, Some(FailureCode::RootOffline)));
+    let entry = SqliteImportLedger::new(&env.db)
+        .get(&job.to_string())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(entry.state, LedgerState::Pending);
 }

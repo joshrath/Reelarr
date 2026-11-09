@@ -6,7 +6,8 @@
 //!
 //! - done: the same `Imported` result again,
 //! - pending and the destination is ours: finish recording it,
-//! - pending and the destination is missing: transfer again,
+//! - pending and the destination is missing: transfer again, unless this
+//!   was a move and the source is also gone (the data is lost),
 //! - the destination exists and is not ours: a terminal conflict.
 //!
 //! The library root is the movie's existing root, else the configured
@@ -110,17 +111,16 @@ impl<P: Prober, R: ReleaseMatcher> MediaImportHandler<P, R> {
             }
             // A move that finished before the crash leaves no source for
             // `prepare` to find, so finish it from the ledger alone. Health
-            // is checked before touching the destination: if the dest can't
-            // be read because the share is down, `size_of` would be `None`
-            // and falling through to `prepare` would permanently fail with
-            // "no importable video file".
+            // is checked before reading the destination. Wrong-size dest is
+            // a conflict; a missing dest is a clear terminal loss; any other
+            // read error on a healthy root is retryable RootOffline.
             if entry.mode == TransferMode::Move && !exists(Path::new(&entry.source_path)).await {
                 let dest = PathBuf::from(&entry.dest_path);
                 let root = self.root(entry.root_id).await?;
                 self.check_health(&root).await?;
                 match tokio::fs::metadata(&dest).await {
                     Ok(meta) if meta.len() == entry.size_bytes => {
-                        ensure_dest_inside(&root, &dest)?;
+                        ensure_dest_inside(&root, &dest).await?;
                         let _ = tokio::fs::remove_file(partial_path(&dest)).await;
                         let probe = if entry.kind.is_disc() {
                             None
@@ -134,6 +134,13 @@ impl<P: Prober, R: ReleaseMatcher> MediaImportHandler<P, R> {
                         self.ledger.mark_done(&job, id).await?;
                         return Ok(ImportResult::Imported { media_file_id: id });
                     }
+                    Ok(_) => {
+                        return Err(Failure::permanent(format!(
+                            "a different file already exists at {}",
+                            dest.display()
+                        ))
+                        .with_code(FailureCode::DestinationConflict));
+                    }
                     Err(e) if e.kind() != std::io::ErrorKind::NotFound => {
                         return Err(Failure::retryable(format!(
                             "library folder {} is unavailable: {e}",
@@ -141,7 +148,13 @@ impl<P: Prober, R: ReleaseMatcher> MediaImportHandler<P, R> {
                         ))
                         .with_code(FailureCode::RootOffline));
                     }
-                    _ => {}
+                    Err(_) => {
+                        return Err(Failure::permanent(format!(
+                            "the import was moved to {} but that file is gone, and the source is no longer at {}",
+                            dest.display(),
+                            entry.source_path
+                        )));
+                    }
                 }
             }
         }
@@ -174,7 +187,7 @@ impl<P: Prober, R: ReleaseMatcher> MediaImportHandler<P, R> {
             }
         };
         self.check_health(&root).await?;
-        ensure_dest_inside(&root, &dest)?;
+        ensure_dest_inside(&root, &dest).await?;
 
         let size_bytes = tokio::fs::metadata(&prepared.source)
             .await
@@ -195,7 +208,12 @@ impl<P: Prober, R: ReleaseMatcher> MediaImportHandler<P, R> {
             })
             .await?;
 
-        self.place(&prepared, &dest, mode, resume).await?;
+        if let Err(failure) = self.place(&prepared, &dest, mode, resume).await {
+            if failure.code == Some(FailureCode::DestinationConflict) {
+                let _ = self.ledger.delete(&job).await;
+            }
+            return Err(failure);
+        }
         let id = self.importer.record(&prepared, root.id, &dest).await?;
         self.ledger.mark_done(&job, id).await?;
         Ok(ImportResult::Imported { media_file_id: id })
@@ -328,17 +346,23 @@ impl<P: Prober + 'static, R: ReleaseMatcher + 'static> ImportHandler for MediaIm
     }
 }
 
-fn ensure_dest_inside(root: &LibraryRoot, dest: &Path) -> Result<(), Failure> {
-    match dest_stays_inside(Path::new(&root.path), dest) {
+async fn ensure_dest_inside(root: &LibraryRoot, dest: &Path) -> Result<(), Failure> {
+    let root_path = PathBuf::from(&root.path);
+    let dest_buf = dest.to_owned();
+    let checked = dest_buf.clone();
+    match tokio::task::spawn_blocking(move || dest_stays_inside(&root_path, &dest_buf))
+        .await
+        .map_err(|e| Failure::retryable(format!("import task failed: {e}")))?
+    {
         Ok(true) => Ok(()),
         Ok(false) => Err(Failure::permanent(format!(
             "import destination {} is outside library folder {}",
-            dest.display(),
+            checked.display(),
             root.path
         ))),
         Err(e) => Err(Failure::retryable(format!(
             "cannot resolve destination {}: {e}",
-            dest.display()
+            checked.display()
         ))
         .with_code(FailureCode::RootOffline)),
     }
@@ -346,7 +370,9 @@ fn ensure_dest_inside(root: &LibraryRoot, dest: &Path) -> Result<(), Failure> {
 
 /// True when every existing prefix of `dest` resolves inside `root`, and any
 /// not-yet-created suffix would stay there. A symlink inside the root that
-/// points outside is rejected.
+/// points outside is rejected. Only [`std::io::ErrorKind::NotFound`] means
+/// a prefix does not exist yet; other stat errors are returned so a hung
+/// share is not treated as a missing folder.
 fn dest_stays_inside(root: &Path, dest: &Path) -> std::io::Result<bool> {
     use std::path::Component;
     if dest
@@ -357,15 +383,20 @@ fn dest_stays_inside(root: &Path, dest: &Path) -> std::io::Result<bool> {
     }
     let root = root.canonicalize()?;
     let mut prefix = dest;
-    while prefix.symlink_metadata().is_err() {
-        match prefix.parent() {
-            Some(parent) if parent != prefix => prefix = parent,
-            _ => return Ok(false),
+    loop {
+        match prefix.symlink_metadata() {
+            Ok(_) => break,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => match prefix.parent() {
+                Some(parent) if parent != prefix => prefix = parent,
+                _ => return Ok(false),
+            },
+            Err(e) => return Err(e),
         }
     }
     let resolved = match prefix.canonicalize() {
         Ok(path) => path,
-        Err(_) => return Ok(false),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+        Err(e) => return Err(e),
     };
     if resolved == root || resolved.starts_with(&root) {
         return Ok(true);
@@ -420,4 +451,27 @@ fn read_full(file: &mut std::fs::File, buf: &mut [u8]) -> std::io::Result<usize>
         }
     }
     Ok(filled)
+}
+
+#[cfg(test)]
+mod dest_inside_tests {
+    use super::dest_stays_inside;
+    use std::io::ErrorKind;
+
+    #[test]
+    fn a_file_in_the_path_is_an_error_not_a_missing_prefix() {
+        let tmp = tempfile::tempdir().unwrap();
+        let file = tmp.path().join("file");
+        std::fs::write(&file, b"x").unwrap();
+        let dest = file.join("nested").join("out.mkv");
+        let err = dest_stays_inside(tmp.path(), &dest).unwrap_err();
+        assert_ne!(err.kind(), ErrorKind::NotFound, "{err}");
+    }
+
+    #[test]
+    fn a_missing_suffix_inside_the_root_is_allowed() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dest = tmp.path().join("Movie").join("Movie.mkv");
+        assert!(dest_stays_inside(tmp.path(), &dest).unwrap());
+    }
 }

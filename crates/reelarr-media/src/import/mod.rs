@@ -269,11 +269,13 @@ impl<M: MovieStore, F: MediaFileStore, P: Prober, R: ReleaseMatcher> Importer<M,
         let mode = self.options.mode;
         let dest_dir = dest.parent().map(Path::to_owned).unwrap_or_default();
         let (src, dst) = (prepared.source.clone(), dest.to_owned());
-        let transferred = blocking_write(move || {
-            std::fs::create_dir_all(&dest_dir)?;
+        let transferred = tokio::task::spawn_blocking(move || {
+            std::fs::create_dir_all(&dest_dir).map_err(transfer::TransferError::Dest)?;
             transfer::transfer(&src, &dst, mode)
         })
-        .await?;
+        .await
+        .map_err(|e| Failure::retryable(format!("import task failed: {e}")))?
+        .map_err(Failure::from)?;
         self.transfer_subtitles(prepared, dest).await;
         Ok(transferred)
     }
@@ -450,15 +452,20 @@ impl From<StoreError> for Failure {
 }
 
 impl From<std::io::Error> for Failure {
-    /// Used for download-side and other non-library I/O. Library write
-    /// failures go through [`Failure::from_library_io`] so an EACCES or EIO
-    /// on the download is not reported as a library permission or offline root.
+    /// Used for download-side and other non-library I/O. AlreadyExists here
+    /// is not a library destination conflict; those go through
+    /// [`Failure::from_library_io`] via [`transfer::TransferError::Dest`].
     fn from(e: std::io::Error) -> Self {
-        if e.kind() == std::io::ErrorKind::AlreadyExists {
-            return Self::permanent(format!("not overwriting existing library file: {e}"))
-                .with_code(FailureCode::DestinationConflict);
-        }
         Self::retryable(format!("file operation failed: {e}"))
+    }
+}
+
+impl From<transfer::TransferError> for Failure {
+    fn from(e: transfer::TransferError) -> Self {
+        match e {
+            transfer::TransferError::Source(e) => Self::from(e),
+            transfer::TransferError::Dest(e) => Self::from_library_io(e),
+        }
     }
 }
 
@@ -504,15 +511,6 @@ async fn blocking<T: Send + 'static>(
         .map_err(Failure::from)
 }
 
-async fn blocking_write<T: Send + 'static>(
-    f: impl FnOnce() -> std::io::Result<T> + Send + 'static,
-) -> Result<T, Failure> {
-    tokio::task::spawn_blocking(f)
-        .await
-        .map_err(|e| Failure::retryable(format!("import task failed: {e}")))?
-        .map_err(Failure::from_library_io)
-}
-
 #[cfg(test)]
 mod errno_tests {
     use super::*;
@@ -525,6 +523,27 @@ mod errno_tests {
         let io = Failure::from(std::io::Error::from_raw_os_error(libc::EIO));
         assert!(io.retryable);
         assert_eq!(io.code, None);
+        let exists = Failure::from(std::io::Error::new(
+            std::io::ErrorKind::AlreadyExists,
+            "download path",
+        ));
+        assert!(exists.retryable);
+        assert_eq!(exists.code, None);
+        let src_denied = Failure::from(transfer::TransferError::Source(
+            std::io::Error::from_raw_os_error(libc::EACCES),
+        ));
+        assert!(src_denied.retryable);
+        assert_eq!(src_denied.code, None);
+        let dest_denied = Failure::from(transfer::TransferError::Dest(
+            std::io::Error::from_raw_os_error(libc::EACCES),
+        ));
+        assert!(!dest_denied.retryable);
+        assert_eq!(dest_denied.code, Some(FailureCode::LibraryPermissionDenied));
+        let dest_io = Failure::from(transfer::TransferError::Dest(
+            std::io::Error::from_raw_os_error(libc::EIO),
+        ));
+        assert!(dest_io.retryable);
+        assert_eq!(dest_io.code, Some(FailureCode::RootOffline));
     }
 
     #[test]

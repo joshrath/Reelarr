@@ -142,4 +142,15 @@ impl SqliteImportLedger {
         .map_err(backend)?;
         Ok(())
     }
+
+    /// Drops a job's plan, used when the destination turned out to be
+    /// someone else's file so a retry does not adopt it.
+    pub async fn delete(&self, job_id: &str) -> Result<(), StoreError> {
+        sqlx::query("DELETE FROM import_ledger WHERE job_id = ?")
+            .bind(job_id)
+            .execute(self.db.pool())
+            .await
+            .map_err(backend)?;
+        Ok(())
+    }
 }
