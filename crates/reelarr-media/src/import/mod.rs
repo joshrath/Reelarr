@@ -495,8 +495,15 @@ impl Failure {
     /// existing destination are not.
     fn from_library_io(e: std::io::Error) -> Self {
         if e.kind() == std::io::ErrorKind::AlreadyExists {
-            return Self::permanent(format!("not overwriting existing library file: {e}"))
-                .with_code(FailureCode::DestinationConflict);
+            let reason = if e.to_string().contains(crate::scan::PARTIAL_SUFFIX) {
+                format!(
+                    "leftover {} file from a previous import: {e}",
+                    crate::scan::PARTIAL_SUFFIX
+                )
+            } else {
+                format!("not overwriting existing library file: {e}")
+            };
+            return Self::permanent(reason).with_code(FailureCode::DestinationConflict);
         }
         match e.raw_os_error() {
             Some(code) if code == libc::ENOSPC => {
@@ -564,6 +571,32 @@ mod errno_tests {
         ));
         assert!(dest_io.retryable);
         assert_eq!(dest_io.code, Some(FailureCode::RootOffline));
+        let leftover = Failure::from(transfer::TransferError::Dest(std::io::Error::new(
+            std::io::ErrorKind::AlreadyExists,
+            format!(
+                "leftover partial file already exists: dest{}",
+                crate::scan::PARTIAL_SUFFIX
+            ),
+        )));
+        assert!(!leftover.retryable);
+        assert_eq!(leftover.code, Some(FailureCode::DestinationConflict));
+        assert!(
+            leftover.reason.contains(crate::scan::PARTIAL_SUFFIX),
+            "{}",
+            leftover.reason
+        );
+        assert!(
+            leftover.reason.contains("previous import"),
+            "{}",
+            leftover.reason
+        );
+        assert!(
+            !leftover
+                .reason
+                .contains("not overwriting existing library file"),
+            "{}",
+            leftover.reason
+        );
     }
 
     #[test]
