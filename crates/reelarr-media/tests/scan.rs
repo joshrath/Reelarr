@@ -395,3 +395,39 @@ async fn disc_folder_over_limits_keeps_its_entry() {
     let files = s.store().list_by_root(LibraryRootId(1)).await.unwrap();
     assert!(files.iter().all(|f| f.status == MediaFileStatus::Present));
 }
+
+/// Regression (#73 review): a folder holding a Blu-ray structure and an
+/// .mkv rip recorded only the disc folder.
+#[tokio::test]
+async fn loose_video_beside_a_disc_structure_is_recorded_too() {
+    let dir = tempfile::tempdir().unwrap();
+    write(dir.path(), "Movie (2010)/BDMV/index.bdmv", b"x");
+    write(dir.path(), "Movie (2010)/BDMV/STREAM/00000.m2ts", b"aaaa");
+    write(dir.path(), "Movie (2010)/Movie (2010).mkv", b"mkv rip");
+    write(
+        dir.path(),
+        "Movie (2010)/Extras/featurette.mkv",
+        b"not scanned",
+    );
+
+    let s = scanner();
+    let report = s.scan_root(&root(dir.path())).await.unwrap();
+    assert_eq!(report.added, 2);
+    let files = s.store().list_by_root(LibraryRootId(1)).await.unwrap();
+    let kinds: Vec<_> = files.iter().map(|f| (f.path.clone(), f.kind)).collect();
+    assert!(
+        kinds
+            .iter()
+            .any(|(p, k)| p.ends_with("Movie (2010)") && *k == MediaKind::DiscFolder),
+        "{kinds:?}"
+    );
+    assert!(
+        kinds
+            .iter()
+            .any(|(p, k)| p.ends_with("Movie (2010).mkv") && *k == MediaKind::File),
+        "{kinds:?}"
+    );
+
+    let report = s.scan_root(&root(dir.path())).await.unwrap();
+    assert_eq!((report.added, report.updated), (0, 0));
+}

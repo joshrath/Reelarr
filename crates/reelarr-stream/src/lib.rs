@@ -19,7 +19,8 @@ use axum::Json;
 use axum::http::{HeaderMap, Method, StatusCode};
 use axum::response::{IntoResponse, Response};
 use reelarr_types::{
-    ApiError, MediaFileId, PlaybackInfo, PlaybackMethod, UnsupportedKind, UnsupportedReason,
+    ApiError, MediaFileId, MediaKind, PlaybackInfo, PlaybackMethod, UnsupportedKind,
+    UnsupportedReason,
 };
 
 /// Errors from the playback endpoints, rendered as `ApiError` JSON.
@@ -29,8 +30,8 @@ pub enum StreamError {
     NotFound,
     #[error("media file unavailable: {0}")]
     Unavailable(String),
-    /// A disc rip, which cannot be streamed yet.
-    #[error("disc images are not playable yet")]
+    /// A disc rip or unrecognized image, which cannot be streamed yet.
+    #[error("this file is not playable yet")]
     NotPlayable,
     #[error("media lookup failed: {0}")]
     Lookup(#[from] LookupError),
@@ -47,7 +48,7 @@ impl IntoResponse for StreamError {
             StreamError::NotPlayable => (
                 StatusCode::UNSUPPORTED_MEDIA_TYPE,
                 "not_playable",
-                "This is a disc image, which can't be played yet.",
+                "This file can't be played yet.",
             ),
             StreamError::Unavailable(_) => (
                 StatusCode::SERVICE_UNAVAILABLE,
@@ -90,17 +91,30 @@ pub async fn playback_info(
     let file = found(lookup.lookup(id).await?)?;
     let ext = file.path.extension().and_then(|e| e.to_str());
     let duration_ms = file.probe.as_ref().and_then(|p| p.duration_ms);
-    if file.kind.is_disc() {
+    if !file.kind.is_streamable() {
+        let reason = match file.kind {
+            MediaKind::DiscFolder => UnsupportedReason {
+                kind: UnsupportedKind::DiscImage,
+                name: None,
+                message: "DVD/Blu-ray folder (not yet playable)".into(),
+            },
+            MediaKind::UnrecognizedImage => UnsupportedReason {
+                kind: UnsupportedKind::Container,
+                name: Some("iso".into()),
+                message: "Not a recognized DVD or Blu-ray image, so it can't be played".into(),
+            },
+            _ => UnsupportedReason {
+                kind: UnsupportedKind::DiscImage,
+                name: None,
+                message: "Disc image (not yet playable)".into(),
+            },
+        };
         return Ok(PlaybackInfo {
             media_file_id: id,
             method: PlaybackMethod::Unsupported,
             stream_url: None,
             mime_type: None,
-            unsupported: vec![UnsupportedReason {
-                kind: UnsupportedKind::DiscImage,
-                name: None,
-                message: "Disc image (not yet playable)".into(),
-            }],
+            unsupported: vec![reason],
             duration_ms,
         });
     }
@@ -141,7 +155,7 @@ pub async fn stream(
         Ok(file) => file,
         Err(e) => return e.into_response(),
     };
-    if file.kind.is_disc() {
+    if !file.kind.is_streamable() {
         return StreamError::NotPlayable.into_response();
     }
     let path = match serve::resolve_within(&file.path, &file.root).await {

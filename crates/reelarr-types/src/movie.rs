@@ -108,8 +108,15 @@ pub enum MediaKind {
 }
 
 impl MediaKind {
+    /// A recognized DVD or Blu-ray rip (image or folder).
     pub fn is_disc(self) -> bool {
-        !matches!(self, MediaKind::File)
+        matches!(self, MediaKind::DiscImage | MediaKind::DiscFolder)
+    }
+
+    /// Whether the entry is a single video file that can be probed and
+    /// streamed. Disc rips and unrecognized images are not.
+    pub fn is_streamable(self) -> bool {
+        self == MediaKind::File
     }
 
     pub fn as_str(self) -> &'static str {
