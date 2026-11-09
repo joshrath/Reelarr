@@ -8,3 +8,4 @@ pub mod not_found;
 pub mod placeholder;
 pub mod record_corner;
 pub mod store_floor;
+pub mod watch;

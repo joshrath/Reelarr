@@ -5,3 +5,4 @@ pub mod header;
 pub mod icon;
 pub mod layout;
 pub mod nav;
+pub mod vcr;

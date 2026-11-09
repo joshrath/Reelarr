@@ -3,7 +3,7 @@
 use leptos::prelude::*;
 use leptos_meta::{MetaTags, Stylesheet, Title, provide_meta_context};
 use leptos_router::{
-    StaticSegment,
+    ParamSegment, StaticSegment,
     components::{Route, Router, Routes},
 };
 
@@ -11,7 +11,7 @@ use crate::components::layout::Layout;
 use crate::pages::{
     back_room::BackRoomPage, counter::CounterPage, employees_only::EmployeesOnlyPage,
     login::LoginPage, not_found::NotFoundPage, record_corner::RecordCornerPage,
-    store_floor::StoreFloorPage,
+    store_floor::StoreFloorPage, watch::WatchPage,
 };
 use crate::theme::{Prefs, PrefsSignal};
 
@@ -65,6 +65,10 @@ pub fn App() -> impl IntoView {
                 <Route
                     path=StaticSegment("employees-only")
                     view=|| view! { <Layout><EmployeesOnlyPage /></Layout> }
+                />
+                <Route
+                    path=(StaticSegment("watch"), ParamSegment("id"))
+                    view=|| view! { <Layout><WatchPage /></Layout> }
                 />
                 <Route path=StaticSegment("login") view=LoginPage />
             </Routes>

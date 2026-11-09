@@ -15,6 +15,7 @@ leptos_router = { workspace = true }
 leptos_meta = { workspace = true }
 reelarr-types = { version = "0.0.1", path = "../reelarr-types" }
 serde = { workspace = true }
+serde_json = { workspace = true }
 
 # Server-side rendering (native).
 leptos_axum = { workspace = true, optional = true }
@@ -24,7 +25,19 @@ axum = { workspace = true, optional = true }
 wasm-bindgen = { workspace = true, optional = true }
 console_error_panic_hook = { workspace = true, optional = true }
 # Always on so SSR type-checks the DOM calls too.
-web-sys = { workspace = true, features = ["Document", "Element", "HtmlDocument"] }
+web-sys = { workspace = true, features = [
+    "Document",
+    "Element",
+    "HtmlDocument",
+    "HtmlMediaElement",
+    "HtmlVideoElement",
+    "MediaError",
+    "RequestCredentials",
+    "RequestInit",
+    "Response",
+    "Window",
+] }
+wasm-bindgen-futures = { workspace = true }
 
 [features]
 default = []

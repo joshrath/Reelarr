@@ -221,3 +221,24 @@ async fn api_responses_keep_their_own_headers() {
         "{cookies:?}"
     );
 }
+
+#[tokio::test]
+async fn watch_page_renders_the_vcr_deck() {
+    let (status, content_type, body) = get("/watch/42").await;
+    assert_eq!(status, 200);
+    assert!(content_type.starts_with("text/html"));
+    // Playback info is fetched in the browser, so the server sends the deck
+    // in its loading state with the transport keys disabled.
+    assert!(body.contains(r#"aria-label="VCR player""#));
+    assert!(body.contains("Loading tape"));
+    assert!(body.contains(r#"aria-label="Seek""#));
+    assert!(body.contains(r#"aria-label="Volume""#));
+    for key in ["REW", "PLAY", "STOP", "FF", "EJECT", "CRT: ON"] {
+        assert!(body.contains(key), "{key}");
+    }
+    assert!(body.contains("--:--:--"));
+    assert!(!body.contains("<video"));
+    // The player is part of the Store Floor, and the footer deck stays empty.
+    assert!(body.contains(r#"<a href="/" aria-current="page""#));
+    assert!(body.contains("No tape in the deck"));
+}
