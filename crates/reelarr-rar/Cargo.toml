@@ -1,0 +1,15 @@
+[package]
+name = "reelarr-rar"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+blake2s_simd = "1.0.5"
+cap-std = "4.0.3"
+crc32fast = "1"
+tempfile = "3"
+thiserror = "2"
+
+unicode-normalization = "0.1"
