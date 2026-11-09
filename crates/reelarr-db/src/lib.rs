@@ -1,11 +1,18 @@
 //! The application's single SQLite database and forward-only migrations.
 
-use std::{path::Path, time::Duration};
+use std::{
+    path::Path,
+    sync::{Arc, OnceLock},
+    time::Duration,
+};
 
 use sqlx::{
     SqlitePool,
     sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions},
 };
+
+mod jobs;
+pub use jobs::SqliteJobStore;
 
 mod settings;
 pub use settings::SqliteSettingsStore;
@@ -24,6 +31,7 @@ pub enum DatabaseError {
 #[derive(Clone, Debug)]
 pub struct Database {
     pool: SqlitePool,
+    jobs: Arc<OnceLock<Arc<jobs::JobRuntime>>>,
 }
 
 impl Database {
@@ -44,7 +52,10 @@ impl Database {
             pool.close().await;
             return Err(error.into());
         }
-        Ok(Self { pool })
+        Ok(Self {
+            pool,
+            jobs: Arc::new(OnceLock::new()),
+        })
     }
 
     pub fn pool(&self) -> &SqlitePool {
