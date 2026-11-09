@@ -36,7 +36,8 @@
 //!
 //! **Shutdown.** [`Supervisor::shutdown`] stops dispatching, fires every
 //! running job's token, joins all job tasks and closes every pool. Stopped
-//! downloads stay `Downloading` and are requeued by the next startup.
+//! downloads stay `Downloading` and are requeued by the next startup. No new
+//! import starts; running imports are not interrupted and are joined too.
 //!
 //! **Admission.** [`Supervisor::enqueue_nzb`] parses and stores an NZB and
 //! creates its `Queued` job (the NZB worker's own admission order: NZB
@@ -44,14 +45,36 @@
 //! calls [`Supervisor::wake`]. Upload and indexer enqueue in the job API both
 //! go through it; there is no second dispatch path.
 //!
-//! **Discard.** [`Supervisor::discard`] removes a cancelled job's staging
-//! directory and unfinished publication. If the job's run is still stopping
-//! it is deferred until the run has returned, so files are never removed
-//! under a running worker.
+//! **Import.** With an [`ImportHandler`] set ([`Supervisor::set_import_handler`];
+//! the server sets the media library's), every NZB job in `ReadyForImport`
+//! is imported: downloads that just finished, and jobs that were already
+//! waiting when the server last stopped (restart recovery also turns an
+//! interrupted `Importing` back into `ReadyForImport`). Imports do not need
+//! NNTP settings and run beside downloads, at most
+//! `max_concurrent_imports` at once, each claiming the job with
+//! `ReadyForImport → Importing` first ([`attempt_import`]). The download's
+//! folder is the one the worker recorded as the job's recovery path; the movie
+//! comes from the stored NZB.
 //!
-//! The job HTTP API is in [`crate::jobs`]. Not here yet: the media import
-//! hookup and cleanup after import (PR 6). A completed download stops at
-//! `ReadyForImport` unless an [`ImportHandler`] was set (tests only so far).
+//! - `Imported`: the job is `Completed`, then the source cleanup for its
+//!   download source runs (built-in NZB: staging and published folder). Cleanup
+//!   runs only after `Completed`, never after a failure or a cancel.
+//! - Retryable failure: the job goes back to `ReadyForImport` and waits
+//!   `import_retry` (1, 5, 15 minutes, then every 30 minutes) before the next
+//!   attempt. The wait is kept in memory; a restart tries again at once.
+//! - Terminal failure: `Failed` with the handler's code (`Other` if none).
+//! - No match: `Failed` with `NoMatch`.
+//!
+//! Without a handler a finished download stops at `ReadyForImport`.
+//!
+//! **Discard.** [`Supervisor::discard`] removes a cancelled job's staging
+//! directory and unfinished publication. If the job's download run is still
+//! stopping, or an import of it is still running (from either path above),
+//! it is deferred until that task has returned, so files are never removed
+//! under a running worker or importer. An import registers before it re-reads
+//! the job, so a cancel that commits after the re-read always finds it.
+//!
+//! The job HTTP API is in [`crate::jobs`].
 
 mod runner;
 
@@ -71,8 +94,9 @@ use std::{
 };
 
 use reelarr_core::{
-    CleanupRegistry, Failure, FailureCode, ImportHandler, Job, JobId, JobKind, JobState, JobStore,
-    JobStoreError, PathMapping, Priority, run_import,
+    CleanupRegistry, CompletedDownload, DownloadSource, Failure, FailureCode, ImportAttempt,
+    ImportHandler, Job, JobId, JobKind, JobState, JobStore, JobStoreError, PathMapping, Priority,
+    attempt_import,
 };
 use reelarr_db::{SqliteJobStore, SqliteNntpStore, SqliteNzbStore};
 use reelarr_nzb::{
@@ -99,7 +123,20 @@ pub struct SupervisorConfig {
     pub error_backoff: Duration,
     /// Ceiling for the hold-back.
     pub max_error_backoff: Duration,
+    /// Imports running at once (at least 1). Separate from downloads.
+    pub max_concurrent_imports: usize,
+    /// Wait before each retry of a retryable import failure: the n-th retry
+    /// waits entry n, and the last entry repeats.
+    pub import_retry: Vec<Duration>,
 }
+
+/// The agreed import retry schedule: 1, 5 and 15 minutes, then every 30.
+pub const IMPORT_RETRY: [Duration; 4] = [
+    Duration::from_secs(60),
+    Duration::from_secs(5 * 60),
+    Duration::from_secs(15 * 60),
+    Duration::from_secs(30 * 60),
+];
 
 impl Default for SupervisorConfig {
     fn default() -> Self {
@@ -108,7 +145,21 @@ impl Default for SupervisorConfig {
             poll_interval: Duration::from_secs(5),
             error_backoff: Duration::from_secs(30),
             max_error_backoff: Duration::from_secs(600),
+            max_concurrent_imports: 1,
+            import_retry: IMPORT_RETRY.to_vec(),
         }
+    }
+}
+
+impl SupervisorConfig {
+    /// Wait before retry number `retry` (1-based) of an import.
+    pub fn import_retry_delay(&self, retry: u32) -> Duration {
+        let index = usize::try_from(retry.saturating_sub(1)).unwrap_or(usize::MAX);
+        self.import_retry
+            .get(index)
+            .or(self.import_retry.last())
+            .copied()
+            .unwrap_or(IMPORT_RETRY[3])
     }
 }
 
@@ -175,6 +226,12 @@ impl ArticleSource for NoArticles {
     }
 }
 
+/// Import wiring: the handler and the cleanup to run after `Completed`.
+struct Importer {
+    handler: Arc<dyn ImportHandler>,
+    cleanups: Arc<CleanupRegistry>,
+}
+
 /// A running job as seen by the registry.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct ActiveJob {
@@ -196,7 +253,7 @@ struct Inner {
     factory: Arc<dyn RunnerFactory>,
     /// Admission and discard only; never runs a job.
     files: Arc<NzbWorker<SqliteNzbStore, NoArticles>>,
-    import: OnceLock<Arc<dyn ImportHandler>>,
+    import: OnceLock<Importer>,
     config: SupervisorConfig,
     wake: Notify,
     reload: AtomicBool,
@@ -219,7 +276,11 @@ struct State {
     draining: Vec<Arc<Generation>>,
     active: HashMap<JobId, Active>,
     held: HashMap<JobId, Hold>,
-    /// Cancelled jobs whose staging files go once their run returns.
+    /// Jobs being imported right now (post-download and leftover alike).
+    importing: HashSet<JobId>,
+    /// Retry wait after a retryable import failure.
+    import_held: HashMap<JobId, Hold>,
+    /// Cancelled jobs whose staging files go once their run or import returns.
     discard: HashSet<JobId>,
     stopping: bool,
 }
@@ -241,6 +302,24 @@ enum Ran {
 }
 
 type TaskResult = (JobId, Ran);
+type ImportTaskResult = (JobId, Result<ImportAttempt, JobStoreError>);
+
+fn importable(job: &Job) -> bool {
+    job.kind == JobKind::Nzb && job.state == JobState::ReadyForImport
+}
+
+/// Claim the job and fail it with `failure` (no download to import).
+async fn fail_import(
+    store: &dyn JobStore,
+    id: JobId,
+    failure: Failure,
+) -> Result<ImportAttempt, JobStoreError> {
+    store.transition(id, JobState::Importing, None).await?;
+    store
+        .transition(id, JobState::Failed, Some(failure))
+        .await
+        .map(ImportAttempt::Finished)
+}
 
 fn dispatchable(job: &Job) -> bool {
     use JobState::*;
@@ -263,6 +342,7 @@ impl Supervisor {
         mut config: SupervisorConfig,
     ) -> Self {
         config.max_concurrent_jobs = config.max_concurrent_jobs.max(1);
+        config.max_concurrent_imports = config.max_concurrent_imports.max(1);
         let store: Arc<dyn JobStore> = jobs.clone();
         let files = Arc::new(NzbWorker::new(store, nzbs.clone(), NoArticles, worker));
         Self {
@@ -284,10 +364,19 @@ impl Supervisor {
         }
     }
 
-    /// Import each download as soon as it reaches `ReadyForImport` (before
-    /// start). The media hookup arrives in PR 6; until then this is for tests.
+    /// Import every NZB job in `ReadyForImport` with `handler` (set before
+    /// start; a second call is ignored). The built-in NZB source cleanup is
+    /// registered with it and runs after `Completed` only.
     pub fn set_import_handler(&self, handler: Arc<dyn ImportHandler>) {
-        let _ = self.inner.import.set(handler);
+        let mut cleanups = CleanupRegistry::default();
+        cleanups.register(
+            DownloadSource::BuiltinNzb,
+            Arc::new(self.inner.files.cleanup()),
+        );
+        let _ = self.inner.import.set(Importer {
+            handler,
+            cleanups: Arc::new(cleanups),
+        });
     }
 
     pub fn config(&self) -> &SupervisorConfig {
@@ -388,8 +477,8 @@ impl Supervisor {
     }
 
     /// Remove a cancelled job's staging directory and unfinished publication.
-    /// While its run is still stopping this is deferred until the run returns.
-    /// Idempotent.
+    /// While its download run is still stopping or an import of it is still
+    /// running, this is deferred until that task returns. Idempotent.
     pub async fn discard(&self, id: JobId) -> Result<Discarded, DiscardError> {
         let job = self.inner.jobs.get(id).await?;
         if job.state != JobState::Cancelled {
@@ -397,7 +486,7 @@ impl Supervisor {
         }
         {
             let mut state = lock(&self.inner.state);
-            if state.active.contains_key(&id) {
+            if state.active.contains_key(&id) || state.importing.contains(&id) {
                 state.discard.insert(id);
                 return Ok(Discarded::WhenStopped);
             }
@@ -421,6 +510,14 @@ impl Supervisor {
         jobs
     }
 
+    /// Jobs being imported right now.
+    pub fn importing(&self) -> Vec<JobId> {
+        let state = lock(&self.inner.state);
+        let mut jobs: Vec<_> = state.importing.iter().copied().collect();
+        jobs.sort();
+        jobs
+    }
+
     /// The generation new jobs are dispatched to, if any provider is usable.
     pub fn current_generation(&self) -> Option<u64> {
         lock(&self.inner.state).current.as_ref().map(|g| g.id)
@@ -435,8 +532,8 @@ impl Supervisor {
             .collect()
     }
 
-    /// Stop dispatching, stop every running job, wait for all of them and
-    /// close every pool. Idempotent.
+    /// Stop dispatching, stop every running job, wait for all of them (and
+    /// for running imports) and close every pool. Idempotent.
     pub async fn shutdown(&self) {
         self.inner.stop.cancel();
         let task = lock(&self.inner.task).take();
@@ -510,6 +607,8 @@ impl Inner {
         let mut tasks: JoinSet<TaskResult> = JoinSet::new();
         let mut task_jobs: HashMap<tokio::task::Id, JobId> = HashMap::new();
         let mut retiring: JoinSet<()> = JoinSet::new();
+        let mut imports: JoinSet<ImportTaskResult> = JoinSet::new();
+        let mut import_jobs: HashMap<tokio::task::Id, JobId> = HashMap::new();
         loop {
             if self.stop.is_cancelled() {
                 break;
@@ -520,6 +619,7 @@ impl Inner {
                 retire(&mut retiring, old);
             }
             self.dispatch(&mut tasks, &mut task_jobs).await;
+            self.dispatch_imports(&mut imports, &mut import_jobs).await;
             tokio::select! {
                 biased;
                 () = self.stop.cancelled() => break,
@@ -528,12 +628,16 @@ impl Inner {
                         retire(&mut retiring, old);
                     }
                 }
+                Some(done) = imports.join_next_with_id(), if !imports.is_empty() => {
+                    self.finish_import(done, &mut import_jobs).await;
+                }
                 Some(_) = retiring.join_next(), if !retiring.is_empty() => {}
                 () = self.wake.notified() => {}
                 () = tokio::time::sleep(self.config.poll_interval) => {}
             }
         }
-        // Graceful stop: no new work, stop and join every running job.
+        // Graceful stop: no new work, stop and join every running job. Imports
+        // cannot be interrupted safely; they are joined, and none starts now.
         let generations = {
             let mut state = lock(&self.state);
             state.stopping = true;
@@ -546,6 +650,9 @@ impl Inner {
             if let Some(old) = self.finish(done, &mut task_jobs).await {
                 retire(&mut retiring, old);
             }
+        }
+        while let Some(done) = imports.join_next_with_id().await {
+            self.finish_import(done, &mut import_jobs).await;
         }
         let leftover: Vec<_> = {
             let mut state = lock(&self.state);
@@ -621,28 +728,10 @@ impl Inner {
             }
             tracing::debug!(job = %id, generation = generation.id, "dispatching download");
             let runner = generation.runner.clone();
-            let jobs = self.jobs.clone();
-            let import = self.import.get().cloned();
+            // The import starts from the scheduler once this run has returned,
+            // so it is never in both registries.
             let handle = tasks.spawn(async move {
                 let ran = match runner.run(id, &cancel).await {
-                    Ok(Outcome::ReadyForImport(download)) => {
-                        if let Some(handler) = import {
-                            let cleanups = CleanupRegistry::default();
-                            let store: &dyn JobStore = &*jobs;
-                            if let Err(error) = run_import(
-                                store,
-                                &*handler,
-                                &cleanups,
-                                download.clone(),
-                                PathMapping::Local,
-                            )
-                            .await
-                            {
-                                tracing::warn!(job = %id, %error, "import after download failed");
-                            }
-                        }
-                        Ran::Outcome(Outcome::ReadyForImport(download))
-                    }
                     Ok(outcome) => Ran::Outcome(outcome),
                     Err(error) => Ran::Error(error),
                 };
@@ -652,12 +741,219 @@ impl Inner {
         }
     }
 
+    /// Start imports for `ReadyForImport` jobs, up to the import limit. Needs
+    /// no NNTP generation.
+    async fn dispatch_imports(
+        &self,
+        tasks: &mut JoinSet<ImportTaskResult>,
+        task_jobs: &mut HashMap<tokio::task::Id, JobId>,
+    ) {
+        let Some(importer) = self.import.get() else {
+            return;
+        };
+        {
+            let state = lock(&self.state);
+            if state.stopping || state.importing.len() >= self.config.max_concurrent_imports {
+                return;
+            }
+        }
+        let queue = match self.jobs.list().await {
+            Ok(jobs) => jobs,
+            Err(error) => {
+                tracing::error!(%error, "could not read the job queue for import");
+                return;
+            }
+        };
+        for job in queue.into_iter().filter(importable) {
+            let id = job.id;
+            // Register before re-reading the job, so a cancel that commits
+            // after the re-read always finds the import and defers discard.
+            {
+                let mut state = lock(&self.state);
+                if state.stopping || state.importing.len() >= self.config.max_concurrent_imports {
+                    return;
+                }
+                if state.importing.contains(&id)
+                    // Its download run has not returned yet.
+                    || state.active.contains_key(&id)
+                    || state
+                        .import_held
+                        .get(&id)
+                        .is_some_and(|h| h.until > Instant::now())
+                {
+                    continue;
+                }
+                state.importing.insert(id);
+            }
+            let download = match self.jobs.get(id).await {
+                Ok(job) if importable(&job) => self.completed_download(&job).await,
+                other => {
+                    if let Err(error) = other {
+                        tracing::warn!(job = %id, %error, "could not re-read job before import");
+                    }
+                    self.release_import(id).await;
+                    continue;
+                }
+            };
+            tracing::debug!(job = %id, "starting import");
+            let jobs = self.jobs.clone();
+            let handler = importer.handler.clone();
+            let cleanups = importer.cleanups.clone();
+            let handle = tasks.spawn(async move {
+                let store: &dyn JobStore = &*jobs;
+                let result = match download {
+                    Ok(download) => {
+                        attempt_import(store, &*handler, &cleanups, download, PathMapping::Local)
+                            .await
+                    }
+                    Err(failure) => fail_import(store, id, failure).await,
+                };
+                (id, result)
+            });
+            task_jobs.insert(handle.id(), id);
+        }
+    }
+
+    /// The completed download of a `ReadyForImport` NZB job, from the folder
+    /// the worker recorded and the movie stored with the NZB. `Err` is the
+    /// failure to record when the folder was never recorded.
+    async fn completed_download(&self, job: &Job) -> Result<CompletedDownload, Failure> {
+        let output_path = match self.jobs.recovery_path(job.id).await {
+            Ok(Some(path)) => path,
+            Ok(None) => {
+                return Err(Failure {
+                    code: FailureCode::Other,
+                    message: "The finished download's folder was not recorded; retry the download"
+                        .into(),
+                    retryable: true,
+                });
+            }
+            Err(error) => {
+                tracing::warn!(job = %job.id, %error, "could not read the download folder");
+                return Err(Failure {
+                    code: FailureCode::Other,
+                    message: "The finished download's folder could not be read".into(),
+                    retryable: true,
+                });
+            }
+        };
+        // A missing NZB row or unreadable movie leaves `None`; the import
+        // then fails as a download without a movie id.
+        let movie_id = match self.nzbs.movie_id(job.id).await {
+            Ok(movie) => movie.flatten(),
+            Err(error) => {
+                tracing::warn!(job = %job.id, %error, "could not read the download's movie");
+                None
+            }
+        };
+        Ok(CompletedDownload {
+            job_id: job.id,
+            movie_id,
+            output_path,
+            category: job.category.clone(),
+            source: DownloadSource::BuiltinNzb,
+            release_title: job.title.clone(),
+        })
+    }
+
+    /// Record a finished import and run a discard deferred while it ran.
+    async fn finish_import(
+        &self,
+        done: Result<(tokio::task::Id, ImportTaskResult), tokio::task::JoinError>,
+        task_jobs: &mut HashMap<tokio::task::Id, JobId>,
+    ) {
+        let (id, result) = match done {
+            Ok((task, (id, result))) => {
+                task_jobs.remove(&task);
+                (id, Ok(result))
+            }
+            Err(error) => {
+                let Some(id) = task_jobs.remove(&error.id()) else {
+                    return;
+                };
+                (id, Err(error))
+            }
+        };
+        let retry = match result {
+            Ok(Ok(ImportAttempt::Finished(job))) => {
+                match job.state {
+                    JobState::Completed => tracing::info!(job = %id, "download imported"),
+                    JobState::Failed => tracing::info!(
+                        job = %id,
+                        code = ?job.failure.as_ref().map(|f| f.code),
+                        "import failed"
+                    ),
+                    state => tracing::debug!(job = %id, ?state, "import finished"),
+                }
+                false
+            }
+            Ok(Ok(ImportAttempt::Retry { failure, .. })) => {
+                tracing::info!(job = %id, code = ?failure.code, "import will be retried");
+                true
+            }
+            Ok(Err(JobStoreError::Transition(error))) => {
+                // Cancelled (or otherwise moved on) while importing.
+                tracing::debug!(job = %id, %error, "job no longer importable");
+                false
+            }
+            Ok(Err(error)) => {
+                tracing::error!(job = %id, %error, "import could not record its result; retrying later");
+                true
+            }
+            Err(error) => {
+                tracing::error!(job = %id, %error, "import task did not finish");
+                let failure = Failure {
+                    code: FailureCode::Other,
+                    message: "The importer crashed while processing this job".into(),
+                    retryable: true,
+                };
+                self.jobs
+                    .transition(id, JobState::Failed, Some(failure))
+                    .await
+                    .is_err()
+            }
+        };
+        let deferred = {
+            let mut state = lock(&self.state);
+            state.importing.remove(&id);
+            if retry {
+                let failures = state.import_held.get(&id).map_or(0, |h| h.failures) + 1;
+                let delay = self.config.import_retry_delay(failures);
+                state.import_held.insert(
+                    id,
+                    Hold {
+                        until: Instant::now() + delay,
+                        failures,
+                    },
+                );
+            } else {
+                state.import_held.remove(&id);
+            }
+            !state.active.contains_key(&id) && state.discard.remove(&id)
+        };
+        if deferred {
+            self.discard_now(id).await;
+        }
+    }
+
+    /// Drop a job from the import registry and run a discard deferred meanwhile.
+    async fn release_import(&self, id: JobId) {
+        let deferred = {
+            let mut state = lock(&self.state);
+            state.importing.remove(&id);
+            !state.active.contains_key(&id) && state.discard.remove(&id)
+        };
+        if deferred {
+            self.discard_now(id).await;
+        }
+    }
+
     /// Drop a job from the registry and run a discard deferred while it ran.
     async fn release(&self, id: JobId) {
         let deferred = {
             let mut state = lock(&self.state);
             state.active.remove(&id);
-            state.discard.remove(&id)
+            !state.importing.contains(&id) && state.discard.remove(&id)
         };
         if deferred {
             self.discard_now(id).await;
@@ -741,7 +1037,7 @@ impl Inner {
     fn settle(&self, id: JobId, hold: bool) -> (Option<Arc<Generation>>, bool) {
         let mut state = lock(&self.state);
         let generation = state.active.remove(&id).map(|a| a.generation);
-        let deferred = state.discard.remove(&id);
+        let deferred = !state.importing.contains(&id) && state.discard.remove(&id);
         if hold {
             let failures = state.held.get(&id).map_or(0, |h| h.failures) + 1;
             let factor = 2u32.saturating_pow(failures.saturating_sub(1).min(16));

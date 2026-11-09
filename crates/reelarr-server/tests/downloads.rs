@@ -233,6 +233,7 @@ fn config(max: usize) -> SupervisorConfig {
         poll_interval: Duration::from_millis(50),
         error_backoff: Duration::from_millis(200),
         max_error_backoff: Duration::from_millis(400),
+        ..SupervisorConfig::default()
     }
 }
 
