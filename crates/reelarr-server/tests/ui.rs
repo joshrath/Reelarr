@@ -242,3 +242,45 @@ async fn watch_page_renders_the_vcr_deck() {
     assert!(body.contains(r#"<a href="/" aria-current="page""#));
     assert!(body.contains("No tape in the deck"));
 }
+
+#[tokio::test]
+async fn store_floor_renders_the_shelf_while_checking() {
+    let (status, _, body) = get("/").await;
+    assert_eq!(status, 200);
+    // The library folders are fetched in the browser, so the server sends
+    // the empty shelf with a loading status and no titles.
+    assert!(body.contains(r#"aria-labelledby="shelf-title""#));
+    assert!(body.contains(r#"class="shelf-board""#));
+    assert!(body.contains("Checking the shelves"));
+    assert!(body.contains(r#"class="shelf-slot""#));
+    assert!(!body.contains(r#"class="clamshell"#));
+    assert!(!body.contains("/case/"));
+    assert!(body.contains("No tape in the deck"));
+}
+
+#[tokio::test]
+async fn case_page_renders_the_clamshell_while_loading() {
+    let (status, content_type, body) = get("/case/42").await;
+    assert_eq!(status, 200);
+    assert!(content_type.starts_with("text/html"));
+    assert!(body.contains(r#"aria-label="Breadcrumb""#));
+    assert!(body.contains("Case #42"));
+    assert!(body.contains("Tape #42"));
+    assert!(body.contains("Loading case"));
+    assert!(body.contains(r#"class="clamshell clamshell-large""#));
+    assert!(body.contains("No cover art"));
+    // No made-up details, and no Play link until the tape is known.
+    assert!(!body.contains("/watch/42"));
+    assert!(!body.to_lowercase().contains("synopsis"));
+    // The case belongs to the Store Floor, and the footer deck stays empty.
+    assert!(body.contains(r#"<a href="/" aria-current="page""#));
+    assert!(body.contains("No tape in the deck"));
+}
+
+#[tokio::test]
+async fn case_page_for_a_bad_id_still_renders_the_frame() {
+    let (status, _, body) = get("/case/not-a-number").await;
+    assert_eq!(status, 200);
+    assert!(body.contains("Case —"));
+    assert!(body.contains("Loading case"));
+}
