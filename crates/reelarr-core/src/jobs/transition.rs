@@ -44,7 +44,10 @@ pub fn validate_transition(job: &Job, to: JobState) -> Result<(), TransitionErro
     }
 }
 
-pub(crate) fn apply_transition(
+/// Validate and apply a lifecycle change to a snapshot. Storage adapters must call
+/// this while holding their write transaction; persistence, timestamps and events
+/// remain the adapter's responsibility. Errors leave the snapshot unchanged.
+pub fn apply_transition(
     job: &mut Job,
     to: JobState,
     failure: Option<Failure>,

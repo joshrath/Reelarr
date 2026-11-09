@@ -7,9 +7,9 @@ use reelarr_server::{app_with_ui, state::AppState};
 use reelarr_types::Health;
 use tower::ServiceExt;
 
-fn test_app() -> Router {
+async fn test_app() -> Router {
     app_with_ui(
-        AppState::default(),
+        AppState::new(reelarr_db::Database::connect(":memory:").await.unwrap()),
         LeptosOptions::builder()
             .output_name("reelarr")
             .site_root("target/site")
@@ -19,6 +19,7 @@ fn test_app() -> Router {
 
 async fn get(path: &str) -> (axum::http::StatusCode, String, String) {
     let res = test_app()
+        .await
         .oneshot(Request::get(path).body(Body::empty()).unwrap())
         .await
         .unwrap();

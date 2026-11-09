@@ -23,6 +23,10 @@ wasm-bindgen = "0.2"
 console_error_panic_hook = "0.1"
 tower = { version = "0.5", features = ["util"] }
 http-body-util = "0.1"
+async-trait = "0.1"
+thiserror = "2"
+sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio", "sqlite", "migrate", "macros"] }
+tempfile = "3"
 
 # cargo-leptos build: `cargo leptos build --release` / `cargo leptos watch`.
 [[workspace.metadata.leptos]]
@@ -37,6 +41,7 @@ lib-default-features = false
 site-root = "target/site"
 site-pkg-dir = "pkg"
 style-file = "crates/reelarr-ui/style/main.css"
+assets-dir = "crates/reelarr-ui/public"
 site-addr = "127.0.0.1:7979"
 reload-port = 7980
 env = "DEV"

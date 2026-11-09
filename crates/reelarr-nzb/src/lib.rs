@@ -1,10 +1,11 @@
-//! Bounded NZB parsing, streaming yEnc decoding, disk assembly and segment storage.
+//! Bounded NZB parsing, TLS NNTP retrieval, yEnc decoding and disk assembly.
 //!
 //! Core owns job lifecycle and scheduling; this crate stores only NZB execution
 //! data. `reelarr-db` will implement [`NzbStore`] in the shared SQLite database.
 //! No subject, group or message ID is interpreted as a filesystem path.
 
 pub mod assembly;
+pub mod nntp;
 mod parser;
 mod store;
 pub mod yenc;
@@ -12,10 +13,8 @@ pub mod yenc;
 pub use parser::{ParseError, ParseLimits, parse};
 pub use store::{InMemoryNzbStore, NzbStore, ResumePlan, SegmentKey, StoreError, StoredNzb};
 
-/// Temporary opaque job identifier, supplied by the caller (not generated here).
-/// TODO: replace with `reelarr_core::JobId` once the core lifecycle PR lands.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
-pub struct JobId(pub u128);
+/// Job identifier owned by `reelarr-core` (UUIDv7), supplied by the caller.
+pub use reelarr_core::jobs::JobId;
 
 /// Parsed NZB metadata and file list. Metadata may contain secrets (passwords);
 /// do not log or expose the document to the UI indiscriminately.

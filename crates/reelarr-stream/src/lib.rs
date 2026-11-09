@@ -1,3 +1,116 @@
-//! Playback: direct play and FFmpeg transcoding.
+//! Playback for Reelarr.
 //!
-//! Placeholder crate. See the roadmap milestones on GitHub.
+//! Direct play is implemented: files the browser can decode are served as-is
+//! with HTTP byte ranges ([`serve`]), after a per-client codec check
+//! ([`compat`]). Remuxing and transcoding with FFmpeg (run as a separate
+//! process) come later; until then unsupported files get a clear reason.
+
+pub mod compat;
+pub mod lookup;
+pub mod range;
+pub mod serve;
+
+pub use compat::{Browser, ClientProfile};
+pub use lookup::{InMemoryMediaLookup, LookupError, MediaLookup, PlayableFile};
+
+use axum::Json;
+use axum::http::{HeaderMap, Method, StatusCode};
+use axum::response::{IntoResponse, Response};
+use reelarr_types::{ApiError, MediaFileId, PlaybackInfo, PlaybackMethod};
+
+/// Errors from the playback endpoints, rendered as `ApiError` JSON.
+#[derive(Debug, thiserror::Error)]
+pub enum StreamError {
+    #[error("media file not found")]
+    NotFound,
+    #[error("media lookup failed: {0}")]
+    Lookup(#[from] LookupError),
+}
+
+impl IntoResponse for StreamError {
+    fn into_response(self) -> Response {
+        let (status, code, message) = match &self {
+            StreamError::NotFound => (
+                StatusCode::NOT_FOUND,
+                "not_found",
+                "That media file does not exist or is not available",
+            ),
+            StreamError::Lookup(_) => (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "lookup_failed",
+                "The library is unavailable",
+            ),
+        };
+        if let StreamError::Lookup(e) = &self {
+            tracing::error!(error = %e, "media lookup failed");
+        }
+        (
+            status,
+            Json(ApiError {
+                code: code.into(),
+                message: message.into(),
+            }),
+        )
+            .into_response()
+    }
+}
+
+/// URL of the byte-range stream for a media file, relative to the site root.
+pub fn stream_url(id: MediaFileId) -> String {
+    format!("/api/v1/media/{}/stream", id.0)
+}
+
+/// Decide how `client` should play a media file.
+pub async fn playback_info(
+    lookup: &dyn MediaLookup,
+    id: MediaFileId,
+    client: ClientProfile,
+) -> Result<PlaybackInfo, StreamError> {
+    let file = lookup.lookup(id).await?.ok_or(StreamError::NotFound)?;
+    let ext = file.path.extension().and_then(|e| e.to_str());
+    let duration_ms = file.probe.as_ref().and_then(|p| p.duration_ms);
+    Ok(match compat::check(file.probe.as_ref(), ext, client) {
+        Ok(mime) => PlaybackInfo {
+            media_file_id: id,
+            method: PlaybackMethod::DirectPlay,
+            stream_url: Some(stream_url(id)),
+            mime_type: Some(mime.into()),
+            unsupported: Vec::new(),
+            duration_ms,
+        },
+        Err(reasons) => PlaybackInfo {
+            media_file_id: id,
+            method: PlaybackMethod::Unsupported,
+            stream_url: None,
+            mime_type: None,
+            unsupported: reasons,
+            duration_ms,
+        },
+    })
+}
+
+/// Serve a media file's bytes, honoring `Range`. The caller must already have
+/// authenticated the request.
+pub async fn stream(
+    lookup: &dyn MediaLookup,
+    id: MediaFileId,
+    method: &Method,
+    headers: &HeaderMap,
+) -> Response {
+    let file = match lookup.lookup(id).await {
+        Ok(Some(file)) => file,
+        Ok(None) => return StreamError::NotFound.into_response(),
+        Err(e) => return StreamError::Lookup(e).into_response(),
+    };
+    let path = match serve::resolve_within(&file.path, &file.root).await {
+        Ok(path) => path,
+        Err(e) => {
+            if matches!(e, serve::PathError::OutsideRoot) {
+                tracing::warn!(id = id.0, path = %file.path.display(), "refused file outside its library root");
+            }
+            return StreamError::NotFound.into_response();
+        }
+    };
+    let mime = serve::mime_for_path(&path);
+    serve::serve_file(&path, mime, method, headers).await
+}

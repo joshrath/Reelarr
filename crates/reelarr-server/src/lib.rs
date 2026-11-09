@@ -1,6 +1,8 @@
 //! Server composition boundary shared with the UI integration.
+pub mod api;
 pub mod auth;
 pub mod state;
+pub mod stream;
 
 use axum::{Json, Router, routing::get};
 use leptos::config::{LeptosOptions, get_configuration};
@@ -10,7 +12,7 @@ use state::AppState;
 pub fn app(state: AppState) -> Router {
     Router::new()
         .route("/health", get(|| async { Json(Health::ok()) }))
-        .nest("/api/v1", auth::router())
+        .nest("/api/v1", api::router(state.clone()))
         .with_state(state)
 }
 

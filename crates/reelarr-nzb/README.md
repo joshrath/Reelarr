@@ -1,4 +1,4 @@
-# reelarr-nzb: parser and resume boundary
+# reelarr-nzb: parser, NNTP, yEnc and resume boundary
 
 Clean-room implementation using the public NZB XML structure
 (<https://www.newzbin.com/DTD/nzb/nzb-1.1.dtd>) and XML 1.0 rules;
@@ -25,9 +25,9 @@ have no Debug implementation; do not log or serialize them indiscriminately.
 ## Lifecycle and persistence integration
 
 Core owns jobs, states, ordering, events and scheduling. This crate defines no
-job state machine. `JobId(u128)` is a temporary opaque bridge: replace it with
-`reelarr-core::JobId` after Core Lead's lifecycle PR lands. No ID generation is
-performed here.
+job state machine. Jobs are identified by `reelarr_core::JobId` (UUIDv7, re-exported
+as `reelarr_nzb::JobId`), supplied by the caller. No ID generation is performed
+here.
 
 `NzbStore` is an async, Send-future, statically dispatched storage boundary.
 `reelarr-db` must implement it in the single shared SQLite database, including
@@ -49,13 +49,81 @@ encoded article bytes done/total (not decoded media bytes).
 Exact versions verified through `cargo info`, package manifests and bundled
 license files: quick-xml 0.42.0 (MIT), thiserror 2.0.21 and its derive helper
 (MIT OR Apache-2.0). quick-xml's memchr dependency is 2.8.3 (MIT OR Unlicense).
-Tokio 1.54.1 is an existing workspace dependency (MIT), used here only in tests.
+Tokio 1.54.1 is an existing workspace dependency (MIT), also used by NNTP.
 The derive graph reuses proc-macro2/quote/syn/unicode-ident already in the lockfile
 (MIT OR Apache-2.0; unicode-ident additionally requires Unicode-3.0). These license options
-are compatible with GPL-3.0-or-later. No new native, network or database dependency.
+are compatible with GPL-3.0-or-later. The parser alone adds no network/database
+dependency; NNTP dependencies are documented below.
 
 Run `cargo fmt --all`, `cargo clippy --workspace --all-targets -- -D warnings`
 and `cargo test --workspace` from the workspace root.
+
+## NNTP transport (#12)
+
+`nntp::Pool` is a lazy single-provider pool using verified implicit TLS (port
+563 by default), SNI and the OS trust store. `with_root_certificates` supports
+an explicit private CA without weakening hostname/chain verification. There is
+no plaintext mode, insecure certificate switch, STARTTLS or OpenSSL dependency.
+The transitive `openssl-probe` only locates OS certificate files; it does not
+link to OpenSSL.
+
+```rust,no_run
+use reelarr_nzb::{Segment, nntp::{Pool, ServerConfig, Credentials, Secret}};
+
+# async fn download(segment: &Segment) -> Result<(), reelarr_nzb::nntp::Error> {
+let mut config = ServerConfig::new("news.example.org");
+// Obtain these from the application's secret storage, not source code/logs.
+config.credentials = Some(Credentials {
+    username: Secret::new("username-from-secret-store"),
+    password: Secret::new("password-from-secret-store"),
+});
+config.max_connections = 8;
+let pool = Pool::new(config)?; // Loads native roots synchronously, once at setup.
+let body = pool.body(segment).await?;
+// Pass body.as_bytes() to #13's decoder as BodyEncoding::DotStuffed.
+// NNTP retains dot-stuffing and CRLFs, strips the status and lone-dot terminator.
+// Never feed this raw wire representation as BodyEncoding::Unstuffed.
+assert!(body.as_bytes().len() <= 8 * 1024 * 1024);
+pool.shutdown().await; // Optional best-effort QUIT; dropping also closes sockets.
+# Ok(()) }
+```
+
+BODY and optional STAT use the parser's existing `Segment` locator, revalidated
+at the command boundary (public fields can bypass XML validation). No GROUP or
+article-number state is required. AUTHINFO credentials use printable ASCII
+without whitespace, within the RFC 512-byte command bound; nonportable
+whitespace/Unicode tokens are rejected instead of silently normalized. Username
+and password are both redacted in Debug/Display. Secrets are not serialized or
+zeroized; secret persistence and memory-dump protection are outside this module.
+Do not log the original string passed to `Secret::new`.
+
+Defaults: 8 connections; 8 MiB complete wire BODY; 8192-byte physical BODY lines
+including CRLF; 512-byte status lines. Bodies are buffered, not streamed, so
+budget memory for the configured connection count and article ceiling (plus
+line/TLS buffers). NZB declared byte counts never size allocations. The line
+reader enforces its cap before appending any untrusted data. A whole operation
+is bounded to 90s including pool waits, connection/auth, all retries and backoff;
+slot acquisition defaults to 10s, connect/TLS to 15s, and each physical line or
+write to 15s. Limits and timeouts are configurable within documented ceilings.
+
+Only complete successes and complete 430 replies return sockets to the pool.
+Cancelling a future, timing out, malformed responses, limits and truncated
+bodies all discard the socket and release capacity. Authentication failures,
+430, TLS validation errors and protocol errors never retry. Transport failures,
+incomplete replies, connect/read/write timeouts, and 400/403 responses get at
+most two additional attempts by default, with capped exponential backoff and
+0–25% jitter. Final errors remain typed, without server text or command values.
+A retry restarts the BODY, never exposes a partial result to the worker.
+Shutdown wakes waiting callers and rejects new work; already-running operations
+are not cancelled and their sockets will not be reused.
+
+Scope: transport only. Core worker/lifecycle wiring, durable checkpoints,
+multi-provider priority/fill, SASL, pipelining, ARTICLE compatibility fallback
+and NNTP compression remain separate work. No real-provider credentials or
+network access are needed for tests.
+
+See [the NNTP source/license ledger](../../docs/nntp.md) for provenance and
+resolved dependency licenses.
 
 ## Streaming yEnc and disk assembly (#13)
 
