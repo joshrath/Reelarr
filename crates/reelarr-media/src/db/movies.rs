@@ -1,7 +1,9 @@
 use reelarr_db::Database;
 use reelarr_types::{Artwork, ExternalIds, Movie, MovieId, MovieMetadata};
-use sqlx::Row;
+// `COLUMNS` is a compile-time constant, so these `format!`ed queries carry no
+// caller-supplied SQL; values are always bound with `?`.
 use sqlx::sqlite::SqliteRow;
+use sqlx::{AssertSqlSafe, Row};
 
 use super::{backend, to_i64, to_u64};
 use crate::store::{MovieStore, StoreError};
@@ -86,34 +88,40 @@ impl MovieStore for SqliteMovieStore {
     }
 
     async fn get(&self, id: MovieId) -> Result<Option<Movie>, StoreError> {
-        sqlx::query(&format!("SELECT {COLUMNS} FROM movies WHERE id = ?"))
-            .bind(id.0)
-            .fetch_optional(self.db.pool())
-            .await
-            .map_err(backend)?
-            .as_ref()
-            .map(row_to_movie)
-            .transpose()
+        sqlx::query(AssertSqlSafe(format!(
+            "SELECT {COLUMNS} FROM movies WHERE id = ?"
+        )))
+        .bind(id.0)
+        .fetch_optional(self.db.pool())
+        .await
+        .map_err(backend)?
+        .as_ref()
+        .map(row_to_movie)
+        .transpose()
     }
 
     async fn find_by_tmdb_id(&self, tmdb_id: u64) -> Result<Option<Movie>, StoreError> {
-        sqlx::query(&format!("SELECT {COLUMNS} FROM movies WHERE tmdb_id = ?"))
-            .bind(to_i64(tmdb_id, "tmdb_id")?)
-            .fetch_optional(self.db.pool())
-            .await
-            .map_err(backend)?
-            .as_ref()
-            .map(row_to_movie)
-            .transpose()
+        sqlx::query(AssertSqlSafe(format!(
+            "SELECT {COLUMNS} FROM movies WHERE tmdb_id = ?"
+        )))
+        .bind(to_i64(tmdb_id, "tmdb_id")?)
+        .fetch_optional(self.db.pool())
+        .await
+        .map_err(backend)?
+        .as_ref()
+        .map(row_to_movie)
+        .transpose()
     }
 
     async fn list(&self) -> Result<Vec<Movie>, StoreError> {
-        sqlx::query(&format!("SELECT {COLUMNS} FROM movies ORDER BY id"))
-            .fetch_all(self.db.pool())
-            .await
-            .map_err(backend)?
-            .iter()
-            .map(row_to_movie)
-            .collect()
+        sqlx::query(AssertSqlSafe(format!(
+            "SELECT {COLUMNS} FROM movies ORDER BY id"
+        )))
+        .fetch_all(self.db.pool())
+        .await
+        .map_err(backend)?
+        .iter()
+        .map(row_to_movie)
+        .collect()
     }
 }
