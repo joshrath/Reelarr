@@ -1,8 +1,8 @@
 //! Movie storage abstraction.
 //!
-//! The real implementation (sqlx + SQLite) lives in `reelarr-db`, which owns
-//! the single Reelarr database and its migrations. This crate only defines
-//! the trait and an in-memory implementation used in tests and examples.
+//! The SQLite implementation is [`crate::db::SqliteMovieStore`]; its schema
+//! is in `reelarr-db`'s migrations. The in-memory implementation here is used
+//! in tests and examples.
 
 use std::collections::BTreeMap;
 use std::future::Future;

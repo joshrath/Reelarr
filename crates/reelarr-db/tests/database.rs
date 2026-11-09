@@ -20,7 +20,7 @@ async fn migrations_run_and_rerun_without_losing_settings() {
         .fetch_one(db.pool())
         .await
         .unwrap();
-    assert_eq!(row.get::<i64, _>("count"), 2);
+    assert_eq!(row.get::<i64, _>("count"), 3);
     let store = SqliteSettingsStore::new(&db);
     let first = store.get("theme").await.unwrap().unwrap();
     assert_eq!(first.key, "theme");
