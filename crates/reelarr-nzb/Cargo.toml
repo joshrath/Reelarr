@@ -9,6 +9,7 @@ repository.workspace = true
 [dependencies]
 reelarr-core = { version = "0.0.1", path = "../reelarr-core" }
 reelarr-rar = { version = "0.0.1", path = "../reelarr-rar" }
+reelarr-types = { version = "0.0.1", path = "../reelarr-types" }
 async-trait.workspace = true
 quick-xml = "0.42"
 crc32fast = "1.5"
@@ -21,6 +22,5 @@ rustls-native-certs = "0.8"
 
 [dev-dependencies]
 tempfile.workspace = true
-reelarr-types = { version = "0.0.1", path = "../reelarr-types" }
 rcgen = { version = "0.14", default-features = false, features = ["ring"] }
 tracing-subscriber = { workspace = true, features = ["fmt"] }
