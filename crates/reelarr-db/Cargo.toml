@@ -14,5 +14,5 @@ sqlx = { workspace = true }
 tokio = { workspace = true }
 
 [dev-dependencies]
-reelarr-types = { path = "../reelarr-types" }
+reelarr-types = { version = "0.0.1", path = "../reelarr-types" }
 tempfile = { workspace = true }

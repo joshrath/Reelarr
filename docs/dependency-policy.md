@@ -44,7 +44,7 @@ review non-Cargo content such as ffmpeg, fonts and other distributed assets.
 
 ## Initial bans errors: implicit wildcard path dependencies
 
-Eleven internal path dependency requirements omitted `version`, which cargo-deny
+Twelve internal path dependency requirements omitted `version`, which cargo-deny
 correctly reports as wildcards across core/db/media/nzb/server/stream/ui manifests.
 They now declare `version = "0.0.1"`, matching the workspace. No `allow-wildcard-paths`
 exception was added, and `wildcards = "deny"` remains enforced.
