@@ -114,3 +114,59 @@ async fn migration_failure_prevents_a_database_handle() {
         Err(DatabaseError::Migration(_))
     ));
 }
+
+#[tokio::test]
+async fn in_memory_pool_shares_migrated_tables_across_concurrent_queries() {
+    // Regression: a multi-connection pool against :memory: gave each acquire its own
+    // empty database, so migrations applied on one connection were invisible to others
+    // (reported by the Media Lead while landing library work in PR #62).
+    let db = Database::connect(":memory:").await.unwrap();
+    let store = SqliteSettingsStore::new(&db);
+    store.set("theme", "dark").await.unwrap();
+
+    let mut tasks = Vec::new();
+    for i in 0..8 {
+        let pool = db.pool().clone();
+        tasks.push(tokio::spawn(async move {
+            let migrations = sqlx::query(
+                "SELECT COUNT(*) AS count FROM _sqlx_migrations WHERE success = 1",
+            )
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+            assert_eq!(migrations.get::<i64, _>("count"), 2);
+
+            let theme = sqlx::query("SELECT value FROM settings WHERE key = ?")
+                .bind("theme")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+            assert_eq!(theme.get::<String, _>("value"), "dark");
+
+            sqlx::query(
+                "INSERT INTO settings (key, value, updated_at) VALUES (?, ?, unixepoch()) \
+                 ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at",
+            )
+            .bind(format!("worker-{i}"))
+            .bind(format!("ok-{i}"))
+            .execute(&pool)
+            .await
+            .unwrap();
+        }));
+    }
+
+    for task in tasks {
+        task.await.unwrap();
+    }
+
+    assert_eq!(db.pool().size(), 1);
+    for i in 0..8 {
+        let row = sqlx::query("SELECT value FROM settings WHERE key = ?")
+            .bind(format!("worker-{i}"))
+            .fetch_one(db.pool())
+            .await
+            .unwrap();
+        assert_eq!(row.get::<String, _>("value"), format!("ok-{i}"));
+    }
+    db.pool().close().await;
+}
