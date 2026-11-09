@@ -8,8 +8,9 @@ use reelarr_core::jobs::{
 use reelarr_nzb::{
     InMemoryNzbStore, Segment, nntp,
     worker::{
-        ArticleSource, CancelToken, NzbWorker, Outcome, ParityBackend, REPAIR_UNAVAILABLE,
-        RecoveryPathError, RecoveryPaths, RepairOutcome, RepairRequest, WorkerConfig,
+        ArticleSource, CancelToken, NzbWorker, Outcome, Par2Verify, ParityBackend, ParityVerdict,
+        REPAIR_UNAVAILABLE, RecoveryPathError, RecoveryPaths, RepairOutcome, RepairRequest,
+        WorkerConfig,
     },
 };
 use std::{
@@ -378,6 +379,14 @@ async fn missing_articles_fail_as_repair_unavailable_and_retry_reuses_completed_
     let files = e.staging.join(job.id.to_string()).join("files");
     assert_eq!(listing(&files), ["1"]);
     assert!(listing(&e.output).is_empty());
+    // The damaged file is kept with its good bytes and a zero-filled hole.
+    let partial = e.staging.join(job.id.to_string()).join("partial/0/a.mkv");
+    let kept = fs::read(&partial).unwrap();
+    let original = &posts[0].data;
+    assert_eq!(kept.len(), original.len());
+    assert_eq!(&kept[..PART], &original[..PART]);
+    assert!(kept[PART..2 * PART].iter().all(|&b| b == 0));
+    assert_eq!(&kept[2 * PART..], &original[2 * PART..]);
 
     // The article shows up later; re-queue fetches only the damaged file.
     e.source.articles.lock().unwrap().insert(gone, saved);
@@ -554,7 +563,13 @@ async fn incomplete_volume_set_fails_extraction() {
 
 struct Parity(Mutex<Vec<RepairRequest>>);
 impl ParityBackend for Parity {
-    fn available(&self) -> bool {
+    async fn verify(&self, _: &RepairRequest, _: &CancelToken) -> ParityVerdict {
+        ParityVerdict::Damaged {
+            needed: 1,
+            available: 0,
+        }
+    }
+    fn can_repair(&self) -> bool {
         true
     }
     async fn repair(&self, request: RepairRequest) -> RepairOutcome {
@@ -577,8 +592,11 @@ async fn available_backend_goes_through_repairing() {
     let parity = Arc::new(Parity(Mutex::new(Vec::new())));
     struct Shared(Arc<Parity>);
     impl ParityBackend for Shared {
-        fn available(&self) -> bool {
-            self.0.available()
+        async fn verify(&self, r: &RepairRequest, c: &CancelToken) -> ParityVerdict {
+            self.0.verify(r, c).await
+        }
+        fn can_repair(&self) -> bool {
+            self.0.can_repair()
         }
         async fn repair(&self, r: RepairRequest) -> RepairOutcome {
             self.0.repair(r).await
@@ -600,6 +618,8 @@ async fn available_backend_goes_through_repairing() {
     assert_eq!(requests[0].damaged_files, [0]);
     assert_eq!(requests[0].recovery_volumes, [1]);
     assert_eq!(requests[0].bad_articles, 1);
+    assert_eq!(requests[0].posted_recovery_blocks, 1);
+    assert_eq!(requests[0].partial_files, [0]);
     let mut saw_repairing = false;
     while let Ok(event) = events.try_recv() {
         saw_repairing |= format!("{:?}", event.kind).contains("Repairing");
@@ -651,4 +671,127 @@ async fn invalid_nzb_creates_no_job() {
             .is_err()
     );
     assert!(e.jobs.list().await.unwrap().is_empty());
+}
+
+fn par2_fixture(name: &str) -> Vec<u8> {
+    fs::read(
+        Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../reelarr-par2/tests/fixtures/basic")
+            .join(name),
+    )
+    .unwrap()
+}
+
+async fn par2_failure(missing: std::ops::Range<usize>) -> (Env, JobId, String) {
+    let posts = [
+        post("movie.mkv", par2_fixture("movie.mkv")),
+        post("notes.nfo", par2_fixture("notes.nfo")),
+        post("basic.par2", par2_fixture("basic.par2")),
+        post("basic.vol00+04.par2", par2_fixture("basic.vol00+04.par2")),
+    ];
+    let (nzb, mut articles) = release("Par2 Release", &posts);
+    for id in &ids(0, &posts[0])[missing] {
+        articles.remove(id);
+    }
+    let e = env(articles);
+    let worker = NzbWorker::new(
+        e.jobs.clone(),
+        InMemoryNzbStore::default(),
+        e.source.clone(),
+        WorkerConfig::new(&e.staging, &e.output),
+    )
+    .with_parity(Par2Verify::default());
+    let job = worker
+        .enqueue(nzb.as_bytes(), "x", None, None)
+        .await
+        .unwrap();
+    let Outcome::Failed(failure) = worker.run(job.id, &CancelToken::new()).await.unwrap() else {
+        panic!("expected failure");
+    };
+    assert_eq!(failure.code, FailureCode::RepairFailed);
+    assert!(!failure.retryable);
+    assert!(failure.message.starts_with(REPAIR_UNAVAILABLE));
+    let job_dir = e.staging.join(job.id.to_string());
+    assert!(!job_dir.join(".reelarr-par2-view").exists());
+    (e, job.id, failure.message)
+}
+
+#[tokio::test]
+async fn par2_verify_reports_a_repairable_release() {
+    // Article 6 is bytes 5000..6000: only PAR2 slice 1 is damaged.
+    let (e, _, message) = par2_failure(5..6).await;
+    assert!(
+        message.contains("needs 1 recovery block and the release has 4"),
+        "{message}"
+    );
+    // Recovery volumes are still not downloaded.
+    assert!(listing(&e.output).is_empty());
+}
+
+#[tokio::test]
+async fn par2_verify_reports_an_unrepairable_release() {
+    // Bytes 0..21000 cover slices 0 to 5.
+    let (_, _, message) = par2_failure(0..21).await;
+    assert!(
+        message.contains("needs 6 recovery blocks but the release only has 4"),
+        "{message}"
+    );
+}
+
+fn corrupt_whole_file_crc(body: &mut [u8]) {
+    let key = b" crc32=";
+    let pos = body.windows(key.len()).rposition(|w| w == key).unwrap() + key.len();
+    body[pos] = if body[pos] == b'0' { b'1' } else { b'0' };
+}
+
+#[tokio::test]
+async fn par2_verify_keeps_a_crc_mismatch_as_partial() {
+    let posts = [
+        post("movie.mkv", par2_fixture("movie.mkv")),
+        post("notes.nfo", par2_fixture("notes.nfo")),
+        post("basic.par2", par2_fixture("basic.par2")),
+        post("basic.vol00+04.par2", par2_fixture("basic.vol00+04.par2")),
+    ];
+    let (nzb, mut articles) = release("Par2 Release", &posts);
+    // Every article is present; only the advertised whole-file CRC is wrong.
+    for id in ids(0, &posts[0]) {
+        corrupt_whole_file_crc(articles.get_mut(&id).unwrap());
+    }
+    let e = env(articles);
+    let worker = NzbWorker::new(
+        e.jobs.clone(),
+        InMemoryNzbStore::default(),
+        e.source.clone(),
+        WorkerConfig::new(&e.staging, &e.output),
+    )
+    .with_parity(Par2Verify::default());
+    let job = worker
+        .enqueue(nzb.as_bytes(), "x", None, None)
+        .await
+        .unwrap();
+    let Outcome::Failed(failure) = worker.run(job.id, &CancelToken::new()).await.unwrap() else {
+        panic!("expected failure");
+    };
+    assert_eq!(failure.code, FailureCode::RepairFailed);
+    assert!(failure.message.starts_with(REPAIR_UNAVAILABLE));
+    // The payload is intact, so PAR2 must not treat the file as Missing
+    // (movie.mkv is 25 slices). The yEnc CRC failure still marks it damaged.
+    assert!(
+        failure
+            .message
+            .contains("PAR2 reports the protected files intact")
+            || failure.message.contains("needs 0 recovery"),
+        "{}",
+        failure.message
+    );
+    assert!(
+        !failure.message.contains("needs 25") && !failure.message.contains("needs 24"),
+        "{}",
+        failure.message
+    );
+    let kept = e
+        .staging
+        .join(job.id.to_string())
+        .join("partial/0/movie.mkv");
+    assert_eq!(fs::read(&kept).unwrap(), par2_fixture("movie.mkv"));
 }

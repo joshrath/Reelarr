@@ -21,6 +21,7 @@ use std::{
     collections::{BTreeMap, BTreeSet},
     fs::{self, File, OpenOptions},
     io::{Read, Seek, SeekFrom, Write},
+    ops::Range,
     path::{Path, PathBuf},
     sync::atomic::{AtomicU64, Ordering},
 };
@@ -230,7 +231,38 @@ impl Assembler {
     }
     /// Require all parts and exact coverage, stream full-file CRC in disk order,
     /// then fsync bytes and directory entries. Only this receipt can checkpoint.
-    pub fn finish(mut self) -> Result<CompletedFile, AssemblyError> {
+    ///
+    /// Incomplete coverage or a whole-file CRC mismatch keeps any written bytes
+    /// (same as [`Assembler::keep_partial`]) instead of deleting them. Use
+    /// [`Assembler::finish_or_partial`] when the caller needs those bytes.
+    pub fn finish(self) -> Result<CompletedFile, AssemblyError> {
+        self.finish_inner().map_err(|(error, _)| error)
+    }
+
+    /// Like [`finish`](Self::finish), but a coverage or CRC failure also
+    /// returns the kept file so the caller can move it aside for repair.
+    pub fn finish_or_partial(
+        self,
+    ) -> Result<Result<CompletedFile, Option<PartialFile>>, AssemblyError> {
+        match self.finish_inner() {
+            Ok(done) => Ok(Ok(done)),
+            Err((error @ (AssemblyError::Io(_) | AssemblyError::Store(_)), _)) => Err(error),
+            Err((_, partial)) => Ok(Err(partial)),
+        }
+    }
+
+    fn finish_inner(mut self) -> Result<CompletedFile, (AssemblyError, Option<PartialFile>)> {
+        match self.check_complete() {
+            Ok(()) => self.emit_completed().map_err(|error| (error, None)),
+            Err(error @ (AssemblyError::Io(_) | AssemblyError::Store(_))) => Err((error, None)),
+            Err(error) => {
+                let partial = self.into_partial().unwrap_or(None);
+                Err((error, partial))
+            }
+        }
+    }
+
+    fn check_complete(&mut self) -> Result<(), AssemblyError> {
         if self.parts.len() != self.expected.segments.len() {
             return Err(AssemblyError::Incomplete);
         }
@@ -264,19 +296,77 @@ impl Assembler {
                 return Err(DecodeError::Crc.into());
             }
         }
+        Ok(())
+    }
+
+    fn emit_completed(mut self) -> Result<CompletedFile, AssemblyError> {
+        let name = self
+            .info
+            .as_ref()
+            .ok_or(AssemblyError::Incomplete)?
+            .name
+            .clone();
+        let output = self.output.as_mut().ok_or(AssemblyError::Incomplete)?;
         output.sync_all()?;
         File::open(&self.dir)?.sync_all()?;
         let parent = self.dir.parent().ok_or(AssemblyError::Metadata)?;
         File::open(parent)?.sync_all()?;
         let result = CompletedFile {
-            path: self.dir.join(&info.name),
+            path: self.dir.join(name),
             expected: self.expected.clone(),
             whole_crc_verified: self.crc.is_some(),
         };
         self.keep = true;
         Ok(result)
     }
+
+    /// Keep an incomplete file for later PAR2 repair instead of deleting it.
+    /// The file is sized to its declared length; byte ranges never written are
+    /// zero (sparse where the filesystem allows) and listed in
+    /// [`PartialFile::missing`]. Written ranges hold validated part bytes, but
+    /// the whole file has no CRC guarantee. `None` when no part was written.
+    pub fn keep_partial(self) -> Result<Option<PartialFile>, AssemblyError> {
+        self.into_partial()
+    }
+
+    fn into_partial(mut self) -> Result<Option<PartialFile>, AssemblyError> {
+        let (Some(info), Some(output)) = (self.info.clone(), self.output.as_mut()) else {
+            return Ok(None);
+        };
+        output.set_len(info.file_size)?;
+        output.sync_all()?;
+        let mut missing = Vec::new();
+        let mut cursor = 0;
+        for (&start, &end) in &self.ranges {
+            if start > cursor {
+                missing.push(cursor..start);
+            }
+            cursor = cursor.max(end);
+        }
+        if cursor < info.file_size {
+            missing.push(cursor..info.file_size);
+        }
+        self.keep = true;
+        Ok(Some(PartialFile {
+            path: self.dir.join(&info.name),
+            file_size: info.file_size,
+            missing,
+        }))
+    }
 }
+
+/// An incomplete file kept by [`Assembler::keep_partial`]. The caller owns the
+/// file and its private directory and must move or remove them.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PartialFile {
+    /// File inside the assembler's private directory.
+    pub path: PathBuf,
+    /// Declared whole-file size (the file's length on disk).
+    pub file_size: u64,
+    /// Zero-filled ranges that were never written, ascending.
+    pub missing: Vec<Range<u64>>,
+}
+
 struct Stage(PathBuf);
 impl Drop for Stage {
     fn drop(&mut self) {
