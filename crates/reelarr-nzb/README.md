@@ -199,7 +199,7 @@ left to `reelarr_core::jobs::run_import`; register `NzbWorker::cleanup()` for
 `DownloadSource::BuiltinNzb` so staging and the published folder are removed
 after a successful import. `enqueue` parses an NZB, stores it with the grab's `movie_id`, then creates its job (the NZB is stored first and removed if the job insert fails, so no runnable job exists without its NZB). The completed download carries that `movie_id`.
 
-Staging lives in `staging_root/<job id>/files/<file index>/<name>`. Damaged files keep their validated bytes under `partial/<file index>/<name>` so a later repair has the good blocks. `Par2Verify` checks the downloaded files (and those partials) against the release's PAR2 index and reports how many recovery blocks repair would need versus how many the release posted; until #38 the job still fails with `Repair unavailable`. A file is moved
+Staging lives in `staging_root/<job id>/files/<file index>/<name>`. Damaged files keep their validated bytes under `partial/<file index>/<name>` so a later repair has the good blocks. `Par2Verify` checks the downloaded files (and those partials) against the release's PAR2 index and, when the damage fits in the posted recovery blocks, downloads those volumes and repairs the files. A file is moved
 there only after the assembler verified and fsynced it, and its segments are
 checkpointed only after that move is durable. Fully checkpointed files that are
 present on disk are reused after pause, restart or re-queue; everything else for
@@ -210,10 +210,11 @@ can be re-entered after a restart from what is on disk.
 
 yEnc part CRCs (and whole-file CRCs when present) decide whether a download is
 intact. Intact downloads never consult parity, and PAR2 recovery volumes
-(`*.volNN+MM.par2`) are not downloaded. Until Rust PAR2 support lands (#74 verify,
-#38 repair) the default `NoParity` backend makes damaged downloads fail with
-`RepairFailed`, `retryable: false`, and a message starting with
-`worker::REPAIR_UNAVAILABLE`; completed files stay in staging for a later retry.
+(`*.volNN+MM.par2`) are not downloaded unless repair needs them. The default
+`NoParity` backend still makes damaged downloads fail with `RepairFailed`,
+`retryable: false`, and a message starting with `worker::REPAIR_UNAVAILABLE`;
+completed files stay in staging for a later retry. `Par2Verify` repairs when
+the on-disk (or posted) recovery blocks are enough.
 
 Extraction recognizes `name.partNN.rar` and `name.rar`/`name.rNN` sets only.
 Encrypted archives fail with `PasswordRequired`; compressed or otherwise

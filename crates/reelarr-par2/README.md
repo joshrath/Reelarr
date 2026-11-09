@@ -1,19 +1,23 @@
 # reelarr-par2
 
-Clean-room PAR2 2.0 **verification** for Reelarr (no repair yet; see #38).
+Clean-room PAR2 2.0 **verification and repair** for Reelarr.
 
 ```rust,ignore
 let report = reelarr_par2::verify_dir(job_dir, &Limits::default(), &cancel, &mut |p| { /* progress */ })?;
 match report.primary().map(|s| s.outcome) {
     Some(Outcome::Valid) => {}
-    Some(Outcome::Repairable { needed, available }) => {}
+    Some(Outcome::Repairable { needed, available }) => {
+        let _ = reelarr_par2::repair_dir(job_dir, &Limits::default(), &cancel, &mut |p| {})?;
+    }
     Some(Outcome::Insufficient { needed, available }) => {}
     Some(Outcome::Incomplete) | None => {}
 }
 ```
 
 - Reads the regular files directly inside one directory through a cap-std
-  `Dir`: no recursion, symlinks ignored, nothing outside opened, nothing written.
+  `Dir`: no recursion, symlinks ignored, nothing outside opened. Verify writes
+  nothing; repair writes only replaced protected files, via a temp file and
+  rename so hard-linked view entries are not written through.
 - PAR2 files are found by `.par2` extension or packet magic, so obfuscated
   names work. Every packet is hostile: length, alignment and packet MD5 are
   checked, set and file IDs are recomputed, budgets in `Limits` bound memory and

@@ -563,16 +563,21 @@ async fn incomplete_volume_set_fails_extraction() {
 
 struct Parity(Mutex<Vec<RepairRequest>>);
 impl ParityBackend for Parity {
-    async fn verify(&self, _: &RepairRequest, _: &CancelToken) -> ParityVerdict {
+    async fn verify(&self, request: &RepairRequest, _: &CancelToken) -> ParityVerdict {
+        let available = request
+            .recovery_volumes
+            .iter()
+            .filter(|&&i| request.job_dir.join("files").join(i.to_string()).exists())
+            .count() as u64;
         ParityVerdict::Damaged {
             needed: 1,
-            available: 0,
+            available,
         }
     }
     fn can_repair(&self) -> bool {
         true
     }
-    async fn repair(&self, request: RepairRequest) -> RepairOutcome {
+    async fn repair(&self, request: RepairRequest, _: &CancelToken) -> RepairOutcome {
         self.0.lock().unwrap().push(request);
         RepairOutcome::Failed {
             message: "not enough recovery blocks".into(),
@@ -598,8 +603,8 @@ async fn available_backend_goes_through_repairing() {
         fn can_repair(&self) -> bool {
             self.0.can_repair()
         }
-        async fn repair(&self, r: RepairRequest) -> RepairOutcome {
-            self.0.repair(r).await
+        async fn repair(&self, r: RepairRequest, c: &CancelToken) -> RepairOutcome {
+            self.0.repair(r, c).await
         }
     }
     let worker = e.worker.with_parity(Shared(parity.clone()));
@@ -717,15 +722,48 @@ async fn par2_failure(missing: std::ops::Range<usize>) -> (Env, JobId, String) {
 }
 
 #[tokio::test]
-async fn par2_verify_reports_a_repairable_release() {
+async fn par2_repairs_a_damaged_slice() {
     // Article 6 is bytes 5000..6000: only PAR2 slice 1 is damaged.
-    let (e, _, message) = par2_failure(5..6).await;
-    assert!(
-        message.contains("needs 1 recovery block and the release has 4"),
-        "{message}"
+    let posts = [
+        post("movie.mkv", par2_fixture("movie.mkv")),
+        post("notes.nfo", par2_fixture("notes.nfo")),
+        post("basic.par2", par2_fixture("basic.par2")),
+        post("basic.vol00+04.par2", par2_fixture("basic.vol00+04.par2")),
+    ];
+    let (nzb, mut articles) = release("Par2 Release", &posts);
+    for id in &ids(0, &posts[0])[5..6] {
+        articles.remove(id);
+    }
+    let e = env(articles);
+    let worker = NzbWorker::new(
+        e.jobs.clone(),
+        InMemoryNzbStore::default(),
+        e.source.clone(),
+        WorkerConfig::new(&e.staging, &e.output),
+    )
+    .with_parity(Par2Verify::default());
+    let job = worker
+        .enqueue(nzb.as_bytes(), "x", None, None)
+        .await
+        .unwrap();
+    let Outcome::ReadyForImport(done) = worker.run(job.id, &CancelToken::new()).await.unwrap()
+    else {
+        panic!("expected a repaired download");
+    };
+    assert_eq!(
+        fs::read(done.output_path.join("movie.mkv")).unwrap(),
+        par2_fixture("movie.mkv")
     );
-    // Recovery volumes are still not downloaded.
-    assert!(listing(&e.output).is_empty());
+    assert_eq!(
+        fs::read(done.output_path.join("notes.nfo")).unwrap(),
+        par2_fixture("notes.nfo")
+    );
+    assert!(
+        !e.staging
+            .join(job.id.to_string())
+            .join(".reelarr-par2-view")
+            .exists()
+    );
 }
 
 #[tokio::test]

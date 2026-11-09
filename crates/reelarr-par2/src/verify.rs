@@ -240,7 +240,7 @@ impl Meter<'_> {
 }
 
 /// The last component of an untrusted PAR2 name, if it is a usable file name.
-fn base_name(name: &[u8]) -> Option<&str> {
+pub(crate) fn base_name(name: &[u8]) -> Option<&str> {
     let name = std::str::from_utf8(name).ok()?;
     let base = name.rsplit(['/', '\\']).next()?;
     (!base.is_empty() && base != "." && base != ".." && !base.contains('\0')).then_some(base)

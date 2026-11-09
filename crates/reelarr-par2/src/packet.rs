@@ -59,6 +59,9 @@ pub struct SetPackets {
     pub slices: HashMap<FileId, Vec<SliceSum>>,
     /// Recovery slice exponents mapped to their data length.
     pub recovery: BTreeMap<u32, u64>,
+    /// Recovery slice bodies (without the exponent), filled only when
+    /// [`Packets::keep_recovery_data`] is set.
+    pub recovery_data: BTreeMap<u32, Vec<u8>>,
 }
 
 /// Packets from any number of PAR2 files, grouped by recovery set.
@@ -66,6 +69,9 @@ pub struct SetPackets {
 pub struct Packets {
     /// Recovery sets by ID.
     pub sets: HashMap<SetId, SetPackets>,
+    /// When true, store recovery slice bodies for repair. Verify leaves this off
+    /// so a directory full of volumes does not balloon memory.
+    pub keep_recovery_data: bool,
     /// Valid packets accepted (including duplicates).
     pub accepted: u64,
     /// Corrupt, truncated or malformed packets skipped.
@@ -164,6 +170,10 @@ impl Packets {
             }
             hasher.update(&body);
         } else {
+            let collect = self.keep_recovery_data && kind == *RECOVERY;
+            if collect && body_len.saturating_sub(4) > limits.max_repair_bytes {
+                return Err(Error::Limit("repair data"));
+            }
             let mut left = body_len;
             let mut buf = vec![0; CHUNK];
             let mut first = true;
@@ -175,6 +185,9 @@ impl Packets {
                 }
                 if first && kind == *RECOVERY && n >= 4 {
                     exponent = Some(u32_at(&buf, 0));
+                }
+                if collect {
+                    body.extend_from_slice(&buf[..n]);
                 }
                 first = false;
                 hasher.update(&buf[..n]);
@@ -203,12 +216,27 @@ impl Packets {
             k if k == IFSC => self.ifsc(set, &body, limits)?,
             k if k == RECOVERY => match exponent {
                 Some(e) => {
+                    let data_len = body_len - 4;
                     let entry = self.sets.entry(set).or_default();
                     match entry.recovery.entry(e) {
                         BEntry::Vacant(v) => {
-                            v.insert(body_len - 4);
+                            v.insert(data_len);
+                            if self.keep_recovery_data
+                                && body.len() as u64 == body_len
+                                && body.len() >= 4
+                            {
+                                let stored = entry
+                                    .recovery_data
+                                    .values()
+                                    .map(|b| b.len() as u64)
+                                    .fold(0u64, u64::saturating_add);
+                                if stored.saturating_add(data_len) > limits.max_repair_bytes {
+                                    return Err(Error::Limit("repair data"));
+                                }
+                                entry.recovery_data.insert(e, body[4..].to_vec());
+                            }
                         }
-                        BEntry::Occupied(o) if *o.get() != body_len - 4 => self.conflicts += 1,
+                        BEntry::Occupied(o) if *o.get() != data_len => self.conflicts += 1,
                         BEntry::Occupied(_) => {}
                     }
                     true
