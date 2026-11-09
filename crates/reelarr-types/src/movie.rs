@@ -108,8 +108,15 @@ pub enum MediaKind {
 }
 
 impl MediaKind {
+    /// A recognized DVD or Blu-ray rip (image or folder).
     pub fn is_disc(self) -> bool {
-        !matches!(self, MediaKind::File)
+        matches!(self, MediaKind::DiscImage | MediaKind::DiscFolder)
+    }
+
+    /// Whether the entry is a single video file that can be probed and
+    /// streamed. Disc rips and unrecognized images are not.
+    pub fn is_streamable(self) -> bool {
+        self == MediaKind::File
     }
 
     pub fn as_str(self) -> &'static str {
@@ -289,4 +296,21 @@ pub struct NewLibraryRoot {
     /// Defaults to [`DEFAULT_RESCAN_INTERVAL_SECS`] when omitted.
     #[serde(default)]
     pub rescan_interval_secs: Option<u64>,
+}
+
+#[cfg(test)]
+mod media_kind_tests {
+    use super::MediaKind;
+
+    #[test]
+    fn unrecognized_images_are_not_discs_and_not_streamable() {
+        assert!(!MediaKind::UnrecognizedImage.is_disc());
+        assert!(!MediaKind::UnrecognizedImage.is_streamable());
+        assert!(MediaKind::DiscImage.is_disc());
+        assert!(!MediaKind::DiscImage.is_streamable());
+        assert!(MediaKind::DiscFolder.is_disc());
+        assert!(!MediaKind::DiscFolder.is_streamable());
+        assert!(!MediaKind::File.is_disc());
+        assert!(MediaKind::File.is_streamable());
+    }
 }

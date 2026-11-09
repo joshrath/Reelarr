@@ -228,3 +228,36 @@ async fn disc_images_are_listed_but_not_streamed() {
     assert_eq!(info.unsupported[0].kind, UnsupportedKind::DiscImage);
     assert!(info.stream_url.is_none());
 }
+
+/// Regression (#73 review): an .iso without a disc signature was reported
+/// as a "Disc image".
+#[tokio::test]
+async fn unrecognized_images_and_disc_folders_get_their_own_message() {
+    let lookup = InMemoryMediaLookup::new();
+    for (id, kind) in [
+        (1, MediaKind::UnrecognizedImage),
+        (2, MediaKind::DiscFolder),
+    ] {
+        lookup.insert(PlayableFile {
+            id: MediaFileId(id),
+            path: format!("/lib/{id}.iso").into(),
+            root: "/lib".into(),
+            probe: None,
+            kind,
+        });
+    }
+    let info = |id| {
+        reelarr_stream::playback_info(
+            &lookup,
+            MediaFileId(id),
+            reelarr_stream::ClientProfile::from_user_agent(""),
+        )
+    };
+    let junk = info(1).await.unwrap();
+    assert_eq!(junk.method, PlaybackMethod::Unsupported);
+    assert_eq!(junk.unsupported[0].kind, UnsupportedKind::Container);
+    assert!(!junk.unsupported[0].message.contains("Disc image"));
+    let folder = info(2).await.unwrap();
+    assert_eq!(folder.unsupported[0].kind, UnsupportedKind::DiscImage);
+    assert!(folder.unsupported[0].message.contains("folder"));
+}
