@@ -58,10 +58,16 @@ jobs:
           push: false
           load: true
           tags: reelarr:ci
-      - name: Smoke test container
+      - name: Smoke test hardened runtime
+        run: scripts/container-smoke.sh reelarr:ci
+      - name: Export exact bundled-tool license inventory
+        if: always()
         run: |
-          docker run -d --name reelarr -p 7979:7979 reelarr:ci
-          for i in $(seq 1 30); do curl -fsS http://localhost:7979/health && break; sleep 1; done
-          curl -fsS http://localhost:7979/ | grep -q 'aria-label="Main"'
-          curl -fsS -o /dev/null http://localhost:7979/pkg/reelarr.wasm
-          docker rm -f reelarr
+          id=$(docker create reelarr:ci)
+          docker cp "$id:/usr/share/reelarr/licenses" runtime-licenses
+          docker rm -v "$id"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: runtime-licenses
+          path: runtime-licenses/

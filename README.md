@@ -65,6 +65,9 @@ Or with Docker:
 docker compose up --build
 ```
 
+See [container runtime](docs/container.md) for PUID/PGID, volume ownership,
+healthchecks and [bundled-tool licenses](docs/licenses.md).
+
 ## Roadmap
 
 0. Foundations

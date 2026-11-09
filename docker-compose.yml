@@ -2,6 +2,12 @@ services:
   reelarr:
     build: .
     container_name: reelarr
+    # Root is used ONLY by the bootstrap; it drops to PUID/PGID before Reelarr.
+    # Omit this override when /config is already owned by the default 1000:1000.
+    user: "0:0"
+    environment:
+      PUID: "${PUID:-1000}"
+      PGID: "${PGID:-1000}"
     ports:
       - "7979:7979"
     volumes:
