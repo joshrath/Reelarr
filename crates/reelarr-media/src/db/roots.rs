@@ -23,6 +23,8 @@ pub enum RootError {
     Overlaps { path: String, existing: String },
     #[error("library folder not found")]
     NotFound,
+    #[error("only a library folder can be the default import folder, not a manual import folder")]
+    DefaultNotLibrary,
     #[error(
         "this folder has {count} files in the library; confirm to forget them (files on disk are not touched)"
     )]
@@ -37,7 +39,7 @@ pub enum RootError {
 /// config-derived, or caller-controlled text may be spliced into SQL passed to
 /// `AssertSqlSafe`. Bind every value with `?` instead.
 const COLUMNS: &str = "r.id, r.path, r.kind, r.rescan_interval_secs, r.health, r.health_reason, \
-     r.health_since, r.health_checked_at";
+     r.health_since, r.health_checked_at, r.is_default";
 
 /// Library roots in the `library_roots` table, including their last health
 /// check.
@@ -56,6 +58,7 @@ fn kind_str(kind: LibraryRootKind) -> &'static str {
 fn row_to_root(row: &SqliteRow) -> Result<LibraryRoot, StoreError> {
     let kind: String = row.try_get("kind").map_err(backend)?;
     let interval: Option<i64> = row.try_get("rescan_interval_secs").map_err(backend)?;
+    let is_default: i64 = row.try_get("is_default").map_err(backend)?;
     Ok(LibraryRoot {
         id: LibraryRootId(row.try_get("id").map_err(backend)?),
         path: row.try_get("path").map_err(backend)?,
@@ -67,6 +70,7 @@ fn row_to_root(row: &SqliteRow) -> Result<LibraryRoot, StoreError> {
         rescan_interval_secs: interval
             .map(|v| to_u64(v, "rescan_interval_secs"))
             .transpose()?,
+        is_default: is_default != 0,
     })
 }
 
@@ -107,20 +111,43 @@ pub(crate) fn normalize_root_path(path: &str) -> Result<String, RootError> {
     Ok(normalized.to_string_lossy().into_owned())
 }
 
+async fn clear_default(tx: &mut sqlx::SqliteConnection) -> Result<(), StoreError> {
+    sqlx::query("UPDATE library_roots SET is_default = 0 WHERE is_default = 1")
+        .execute(tx)
+        .await
+        .map_err(backend)?;
+    Ok(())
+}
+
 impl SqliteLibraryRootStore {
     pub fn new(db: &Database) -> Self {
         Self { db: db.clone() }
     }
 
-    /// Adds a root. Rejects relative paths, duplicates and roots nested
-    /// inside (or containing) an existing root, since a file must belong to
-    /// exactly one root.
+    /// Adds a root. Rejects relative paths, paths that exist but are not a
+    /// folder, duplicates and roots nested inside (or containing) an existing
+    /// root, since a file must belong to exactly one root.
+    ///
+    /// A path that does not exist yet is accepted (a share may not be mounted
+    /// yet); no folder is ever created. With `is_default` set, the new root
+    /// becomes the only default import folder in the same transaction;
+    /// otherwise no default is set, not even for the first root.
     pub async fn add(&self, new: NewLibraryRoot) -> Result<LibraryRoot, RootError> {
         let path = normalize_root_path(&new.path)?;
         if new.rescan_interval_secs == Some(0) {
             return Err(RootError::InvalidPath(
                 "rescan interval must be at least one second".into(),
             ));
+        }
+        if new.is_default && new.kind != LibraryRootKind::Library {
+            return Err(RootError::DefaultNotLibrary);
+        }
+        if let Ok(meta) = tokio::fs::metadata(&path).await
+            && !meta.is_dir()
+        {
+            return Err(RootError::InvalidPath(format!(
+                "{path} exists but is not a folder"
+            )));
         }
         for existing in self.list().await? {
             if existing.path == path {
@@ -138,13 +165,19 @@ impl SqliteLibraryRootStore {
             .rescan_interval_secs
             .map(|v| to_i64(v, "rescan_interval_secs"))
             .transpose()?;
+        let mut tx = self.db.pool().begin().await.map_err(backend)?;
+        if new.is_default {
+            clear_default(&mut tx).await?;
+        }
         let done = sqlx::query(
-            "INSERT INTO library_roots (path, kind, rescan_interval_secs) VALUES (?, ?, ?)",
+            "INSERT INTO library_roots (path, kind, rescan_interval_secs, is_default) \
+             VALUES (?, ?, ?, ?)",
         )
         .bind(&path)
         .bind(kind_str(new.kind))
         .bind(interval)
-        .execute(self.db.pool())
+        .bind(i64::from(new.is_default))
+        .execute(&mut *tx)
         .await
         .map_err(|e| match &e {
             sqlx::Error::Database(d) if d.is_unique_violation() => {
@@ -152,12 +185,48 @@ impl SqliteLibraryRootStore {
             }
             _ => RootError::Store(backend(e)),
         })?;
+        tx.commit().await.map_err(backend)?;
         Ok(LibraryRoot {
             id: LibraryRootId(done.last_insert_rowid()),
             path,
             kind: new.kind,
             rescan_interval_secs: new.rescan_interval_secs,
+            is_default: new.is_default,
         })
+    }
+
+    /// Makes `id` the only default import folder. Idempotent. Fails with
+    /// [`RootError::NotFound`] for an unknown id and
+    /// [`RootError::DefaultNotLibrary`] for a manual-import folder; on
+    /// failure the previous default is kept.
+    pub async fn set_default(&self, id: LibraryRootId) -> Result<LibraryRoot, RootError> {
+        let mut tx = self.db.pool().begin().await.map_err(backend)?;
+        let kind: Option<String> = sqlx::query("SELECT kind FROM library_roots WHERE id = ?")
+            .bind(id.0)
+            .fetch_optional(&mut *tx)
+            .await
+            .map_err(backend)?
+            .map(|row| row.try_get("kind"))
+            .transpose()
+            .map_err(backend)?;
+        match kind.as_deref() {
+            None => return Err(RootError::NotFound),
+            Some("library") => {}
+            Some(_) => return Err(RootError::DefaultNotLibrary),
+        }
+        // Clear first: the partial unique index is checked row by row.
+        sqlx::query("UPDATE library_roots SET is_default = 0 WHERE is_default = 1 AND id <> ?")
+            .bind(id.0)
+            .execute(&mut *tx)
+            .await
+            .map_err(backend)?;
+        sqlx::query("UPDATE library_roots SET is_default = 1 WHERE id = ?")
+            .bind(id.0)
+            .execute(&mut *tx)
+            .await
+            .map_err(backend)?;
+        tx.commit().await.map_err(backend)?;
+        self.get(id).await?.ok_or(RootError::NotFound)
     }
 
     /// All roots, ordered by id.
@@ -259,7 +328,8 @@ impl SqliteLibraryRootStore {
 
     /// Removes a root. If the library knows files under it, this fails with
     /// [`RootError::HasFiles`] unless `forget_files` is set, in which case
-    /// their rows are deleted. Files on disk are never touched.
+    /// their rows are deleted. Files on disk are never touched. Removing the
+    /// default import folder leaves no default set.
     pub async fn remove(&self, id: LibraryRootId, forget_files: bool) -> Result<(), RootError> {
         let mut tx = self.db.pool().begin().await.map_err(backend)?;
         let count: i64 = sqlx::query("SELECT COUNT(*) AS n FROM media_files WHERE root_id = ?")

@@ -11,9 +11,13 @@
 //!   through to prepare,
 //! - the destination exists and is not ours: a terminal conflict.
 //!
-//! The library root is the movie's existing root, else the configured
-//! default, else the only library root. It never falls back to another root:
-//! an offline root is a retryable failure, not a reason to scatter a movie.
+//! The library root is the movie's existing root, else the default import
+//! folder (read from the store on every import), else the only library root.
+//! It never falls back to another root: an offline root is a retryable
+//! failure, not a reason to scatter a movie. When no root can be chosen (no
+//! library folder, or several and no default) the failure is retryable
+//! [`FailureCode::NoDefaultRoot`]: the job waits in `ReadyForImport` until
+//! the user adds a library folder or picks the default.
 
 use std::io::Read;
 use std::os::unix::fs::MetadataExt;
@@ -41,7 +45,8 @@ use crate::scan::{MediaFileStore, Prober};
 /// Settings for [`MediaImportHandler`].
 #[derive(Debug, Clone)]
 pub struct HandlerOptions {
-    /// Library root for new movies when there are several.
+    /// Overrides the stored default import folder (for tests). `None`, the
+    /// default, reads `library_roots.is_default` on every import.
     pub default_root: Option<LibraryRootId>,
     /// Rename template; see [`super::naming::render`].
     pub template: String,
@@ -324,7 +329,7 @@ impl<P: Prober, R: ReleaseMatcher> MediaImportHandler<P, R> {
             .filter(|r| r.kind == LibraryRootKind::Library)
             .collect();
         if roots.is_empty() {
-            return Err(Failure::permanent("no library folder is configured".into())
+            return Err(Failure::retryable("no library folder is configured".into())
                 .with_code(FailureCode::NoDefaultRoot));
         }
         let existing = self.importer.files.list_by_movie(movie_id).await?;
@@ -335,15 +340,20 @@ impl<P: Prober, R: ReleaseMatcher> MediaImportHandler<P, R> {
         {
             return Ok(root.clone());
         }
-        if let Some(default) = self.default_root {
+        // The test override, else the stored default (only library roots
+        // can carry it, so it is always among `roots`).
+        let default = self
+            .default_root
+            .or_else(|| roots.iter().find(|r| r.is_default).map(|r| r.id));
+        if let Some(default) = default {
             return roots.into_iter().find(|r| r.id == default).ok_or_else(|| {
-                Failure::permanent("the default import folder is not a library folder".into())
+                Failure::retryable("the default import folder is not a library folder".into())
                     .with_code(FailureCode::NoDefaultRoot)
             });
         }
         match roots.as_slice() {
             [root] => Ok(root.clone()),
-            _ => Err(Failure::permanent(
+            _ => Err(Failure::retryable(
                 "several library folders and none is set as the import default".into(),
             )
             .with_code(FailureCode::NoDefaultRoot)),
