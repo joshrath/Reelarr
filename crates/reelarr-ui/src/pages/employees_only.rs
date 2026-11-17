@@ -24,9 +24,10 @@ use crate::components::icon::{Icon, IconName};
 use crate::library::FolderHealth;
 use crate::playback::SIGN_IN_PATH;
 use crate::settings::{
-    NNTP_PATH, NNTP_SHOWN_CODES, NNTP_TEST_PATH, NntpDraft, NntpField, RESCAN_CHOICES,
-    ROOT_SHOWN_CODES, ROOTS_PATH, RootRow, kind_value, new_root, nntp_summary, password_status,
-    root_check_path, root_remove_path, test_result,
+    MainFolder, NNTP_PATH, NNTP_SHOWN_CODES, NNTP_TEST_PATH, NntpDraft, NntpField, PICK_MAIN_TITLE,
+    RESCAN_CHOICES, ROOTS_PATH, RootRow, kind_value, new_root, nntp_summary, password_status,
+    pick_main_message, root_check_path, root_default_path, root_error, root_remove_path,
+    test_result,
 };
 use crate::staff::{Gate, LoadProblem, SESSION_PATH, action_error, gate};
 
@@ -203,7 +204,36 @@ fn RootsSection() -> AnyView {
                     announce.set(format!("Checked {path}: {}.", health.label()));
                     replace(info);
                 }
-                Err(failure) => row_error.set(Some((id, action_error(&failure, ROOT_SHOWN_CODES)))),
+                Err(failure) => {
+                    if failure.code() == Some("not_found") {
+                        load();
+                    }
+                    row_error.set(Some((id, root_error(&failure))));
+                }
+            }
+            busy.set(None);
+        });
+    });
+    // Make a library folder the main one. The server clears the old pick,
+    // so the whole list is read again.
+    let make_main = Callback::new(move |(id, path): (i64, String)| {
+        busy.set(Some(id));
+        row_error.set(None);
+        leptos::task::spawn_local(async move {
+            match send_json::<(), LibraryRootInfo>(Method::Put, &root_default_path(id), None).await
+            {
+                Ok(_) => {
+                    announce.set(format!(
+                        "{path} is now the main library folder. New imports go into it."
+                    ));
+                    load();
+                }
+                Err(failure) => {
+                    if failure.code() == Some("not_found") {
+                        load();
+                    }
+                    row_error.set(Some((id, root_error(&failure))));
+                }
             }
             busy.set(None);
         });
@@ -222,18 +252,24 @@ fn RootsSection() -> AnyView {
                     announce.set(format!("Removed {path}."));
                 }
                 Err(failure) => {
-                    if failure.code() == Some("root_has_files") {
+                    if matches!(failure.code(), Some("root_has_files" | "not_found")) {
                         // Files were found since the list was read: show the
                         // new count so the next confirm says it.
                         load();
                     }
-                    row_error.set(Some((id, action_error(&failure, ROOT_SHOWN_CODES))));
+                    row_error.set(Some((id, root_error(&failure))));
                 }
             }
             busy.set(None);
         });
     });
 
+    let main = Memo::new(move |_| {
+        roots.with(|r| match r {
+            Some(Ok(list)) => MainFolder::of(list),
+            _ => MainFolder::NoLibrary,
+        })
+    });
     let ids = Memo::new(move |_| {
         roots.with(|r| match r {
             Some(Ok(list)) => list.iter().map(|i| i.root.id.0).collect::<Vec<_>>(),
@@ -257,16 +293,34 @@ fn RootsSection() -> AnyView {
                     <div class="staff-card">
                         <p class="staff-card-title">"No library folders yet"</p>
                         <p>
-                            "Add the folder where your movies live, as Reelarr sees it inside its container. The Store Floor stocks its shelves from these folders."
+                            "Add the folder where your movies live by typing its path below, as Reelarr sees it inside its container. Pick a folder that already exists: Reelarr won't create the directory. The Store Floor stocks its shelves from these folders."
                         </p>
                     </div>
                 }
                 .into_any(),
-                Some(Ok(false)) => ().into_any(),
+                Some(Ok(false)) => (move || {
+                    (main.get() == MainFolder::NeedsPick).then(|| {
+                        let message = roots.with(|r| match r {
+                            Some(Ok(list)) => pick_main_message(list),
+                            _ => String::new(),
+                        });
+                        view! {
+                            <div class="staff-card staff-card-alert" role="status">
+                                <p class="staff-card-title">
+                                    <Icon name=IconName::Info />
+                                    {PICK_MAIN_TITLE}
+                                </p>
+                                <p>{message}</p>
+                                <p>"Use “Make main library folder” on the one you want."</p>
+                            </div>
+                        }
+                    })
+                })
+                .into_any(),
             }}
             <ul class="vault-list" class:vault-list-empty=move || ids.with(Vec::is_empty)>
                 <For each=move || ids.get() key=|id| *id let:id>
-                    <RootItem id roots busy row_error check remove />
+                    <RootItem id roots main busy row_error check make_main remove />
                 </For>
             </ul>
             <p class="staff-note">
@@ -274,11 +328,19 @@ fn RootsSection() -> AnyView {
                 "Disk usage for these folders isn't reported yet."
             </p>
             {move || roots.with(|r| matches!(r, Some(Ok(_)))).then(|| view! {
-                <AddRoot on_added=Callback::new(move |info: LibraryRootInfo| {
-                    let row = RootRow::of(&info);
-                    announce.set(format!("Added {}: {}.", row.path, row.health.label()));
-                    replace(info);
-                }) />
+                <AddRoot
+                    has_library=Signal::derive(move || main.get() != MainFolder::NoLibrary)
+                    on_added=Callback::new(move |info: LibraryRootInfo| {
+                        let row = RootRow::of(&info);
+                        announce.set(format!("Added {}: {}.", row.path, row.health.label()));
+                        if row.is_default {
+                            // The server cleared the old pick.
+                            load();
+                        } else {
+                            replace(info);
+                        }
+                    })
+                />
             })}
         </RootsFrame>
     }
@@ -290,9 +352,11 @@ fn RootsSection() -> AnyView {
 fn RootItem(
     id: i64,
     roots: RwSignal<Option<Result<Vec<LibraryRootInfo>, LoadProblem>>>,
+    main: Memo<MainFolder>,
     busy: RwSignal<Option<i64>>,
     row_error: RwSignal<Option<(i64, String)>>,
     check: Callback<(i64, String)>,
+    make_main: Callback<(i64, String)>,
     remove: Callback<(i64, String, bool)>,
 ) -> AnyView {
     let row = Memo::new(move |_| {
@@ -322,6 +386,9 @@ fn RootItem(
     };
     let check_path = path.clone();
     let remove_path = path.clone();
+    let main_path = path.clone();
+    let tag = move || row.with(|r| r.as_ref().and_then(|r| main.get().tag(r)));
+    let can_pick = move || row.with(|r| r.as_ref().is_some_and(|r| main.get().can_pick(r)));
 
     view! {
         <li class="vault" class:vault-problem=move || problem().is_some()>
@@ -329,7 +396,15 @@ fn RootItem(
                 <Icon name=IconName::HardDrive />
             </span>
             <div class="vault-main">
-                <p class="vault-path">{path.clone()}</p>
+                <p class="vault-path">
+                    {path.clone()}
+                    {move || tag().map(|t| view! {
+                        <span class="vault-main-tag">
+                            <Icon name=IconName::Star />
+                            {t}
+                        </span>
+                    })}
+                </p>
                 <p class="vault-facts">
                     <span class="vault-kind">{initial.kind}</span>
                     <span>{move || row.with(|r| r.as_ref().map(RootRow::files_label))}</span>
@@ -359,6 +434,21 @@ fn RootItem(
                         <Icon name=IconName::Sync />
                         {move || if is_busy.get() { "Working…" } else { "Check now" }}
                     </button>
+                    {move || can_pick().then(|| {
+                        let path = main_path.clone();
+                        view! {
+                            <button
+                                type="button"
+                                class="button"
+                                aria-label=format!("Make {path} the main library folder")
+                                disabled=move || is_busy.get()
+                                on:click=move |_| make_main.run((id, path.clone()))
+                            >
+                                <Icon name=IconName::Star />
+                                "Make main library folder"
+                            </button>
+                        }
+                    })}
                     {move || {
                         let current = row.get()?;
                         let forget = current.forget_files();
@@ -368,7 +458,7 @@ fn RootItem(
                                 id=format!("remove-root-{id}")
                                 trigger="Remove…"
                                 trigger_label=format!("Remove {}", current.path)
-                                question=current.remove_question()
+                                question=current.remove_question(&main.get())
                                 confirm="Yes, remove folder"
                                 keep="Keep it"
                                 on_confirm=move |()| remove.run((id, path.clone(), forget))
@@ -385,7 +475,13 @@ fn RootItem(
 
 /// The add-a-folder form.
 #[component]
-fn AddRoot(on_added: Callback<LibraryRootInfo>) -> impl IntoView {
+fn AddRoot(
+    /// Whether a library folder exists already, so the new one could be
+    /// made main instead.
+    has_library: Signal<bool>,
+    on_added: Callback<LibraryRootInfo>,
+) -> impl IntoView {
+    let make_main = RwSignal::new(false);
     let path = RwSignal::new(String::new());
     let kind = RwSignal::new(kind_value(LibraryRootKind::Library).to_string());
     let rescan = RwSignal::new(RESCAN_CHOICES[0].0.to_string());
@@ -399,6 +495,7 @@ fn AddRoot(on_added: Callback<LibraryRootInfo>) -> impl IntoView {
             &path.get_untracked(),
             &kind.get_untracked(),
             &rescan.get_untracked(),
+            make_main.get_untracked() && has_library.get_untracked(),
         ) {
             Ok(new) => new,
             Err(message) => {
@@ -414,6 +511,7 @@ fn AddRoot(on_added: Callback<LibraryRootInfo>) -> impl IntoView {
             match send_json::<_, LibraryRootInfo>(Method::Post, ROOTS_PATH, Some(&new)).await {
                 Ok(info) => {
                     path.set(String::new());
+                    make_main.set(false);
                     on_added.run(info);
                 }
                 Err(failure) => {
@@ -421,7 +519,7 @@ fn AddRoot(on_added: Callback<LibraryRootInfo>) -> impl IntoView {
                         failure.code(),
                         Some("invalid_path" | "duplicate_root" | "overlapping_root")
                     ));
-                    error.set(Some(action_error(&failure, ROOT_SHOWN_CODES)));
+                    error.set(Some(root_error(&failure)));
                 }
             }
             busy.set(false);
@@ -451,7 +549,7 @@ fn AddRoot(on_added: Callback<LibraryRootInfo>) -> impl IntoView {
                     bind:value=path
                 />
                 <p id="root-path-hint" class="staff-hint">
-                    "The full path inside the Reelarr container, such as where a share is mounted."
+                    "The full path inside the Reelarr container, such as where a share is mounted. Reelarr doesn't create folders: type one that already exists. A share that isn't mounted yet can still be added; it shows as offline until it is."
                 </p>
             </div>
             <fieldset class="staff-field staff-choices">
@@ -489,6 +587,19 @@ fn AddRoot(on_added: Callback<LibraryRootInfo>) -> impl IntoView {
                         .collect_view()}
                 </select>
             </div>
+            <Show when=move || {
+                has_library.get() && kind.get() == kind_value(LibraryRootKind::Library)
+            }>
+                <label class="staff-choice staff-field-wide" for="root-make-main">
+                    <input
+                        id="root-make-main"
+                        type="checkbox"
+                        prop:checked=move || make_main.get()
+                        on:change=move |ev| make_main.set(event_target_checked(&ev))
+                    />
+                    "Make this the main library folder (new imports go into it)"
+                </label>
+            </Show>
             <p id="root-form-error" class="form-error" role="alert">{move || error.get()}</p>
             <div class="staff-actions">
                 <button type="submit" class="button primary" disabled=move || busy.get()>

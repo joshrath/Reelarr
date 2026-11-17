@@ -272,6 +272,18 @@ impl JobCard {
     }
 }
 
+/// Whether a finished download is waiting to go on a shelf (or is held
+/// because no library folder could be chosen).
+pub fn waiting_for_import(jobs: &[JobSnapshot]) -> bool {
+    jobs.iter().any(|j| {
+        j.state == JobState::ReadyForImport
+            || (!is_finished(j.state)
+                && j.failure
+                    .as_ref()
+                    .is_some_and(|f| f.code == FailureCode::NoDefaultRoot))
+    })
+}
+
 /// Jobs still being worked on, and finished ones, each in server order.
 pub fn split(jobs: &[JobSnapshot]) -> (Vec<JobSnapshot>, Vec<JobSnapshot>) {
     jobs.iter().cloned().partition(|j| !is_finished(j.state))
@@ -551,6 +563,21 @@ mod tests {
         let empty = telemetry(&[]);
         assert_eq!(empty.on_decks, 0);
         assert_eq!(empty.throughput, None);
+    }
+
+    #[test]
+    fn import_waits_are_spotted() {
+        assert!(!waiting_for_import(&[job(JobState::Downloading)]));
+        assert!(waiting_for_import(&[job(JobState::ReadyForImport)]));
+        let mut held = job(JobState::Importing);
+        held.failure = Some(Failure {
+            code: FailureCode::NoDefaultRoot,
+            message: "no default".into(),
+            retryable: true,
+        });
+        assert!(waiting_for_import(&[held.clone()]));
+        held.state = JobState::Failed;
+        assert!(!waiting_for_import(&[held]));
     }
 
     #[test]

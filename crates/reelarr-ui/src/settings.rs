@@ -17,22 +17,13 @@ use reelarr_types::{
     },
 };
 
+use crate::api::SendFailure;
 use crate::library::FolderHealth;
-use crate::staff::utc_datetime;
+use crate::staff::{action_error, utc_datetime};
 
 pub use crate::library::ROOTS_PATH;
 pub const NNTP_PATH: &str = "/api/v1/settings/nntp";
 pub const NNTP_TEST_PATH: &str = "/api/v1/settings/nntp/test";
-
-/// Error codes whose server message the folder forms may repeat: they're
-/// static or quote only the path that was typed.
-pub const ROOT_SHOWN_CODES: &[&str] = &[
-    "invalid_path",
-    "duplicate_root",
-    "overlapping_root",
-    "root_has_files",
-    "not_found",
-];
 
 /// Error codes whose server message the NNTP form may repeat: static
 /// validation text that never contains the values sent.
@@ -120,6 +111,11 @@ pub struct RootRow {
     pub health: FolderHealth,
     pub files: u64,
     pub checked: String,
+    /// A `Library` folder (not manual import): the only kind that can be
+    /// the main library folder.
+    pub is_library: bool,
+    /// Picked as the main library folder (`is_default`).
+    pub is_default: bool,
 }
 
 impl RootRow {
@@ -135,6 +131,8 @@ impl RootRow {
                 Some(at) => format!("Checked {}", utc_datetime(at)),
                 None => "Never checked".into(),
             },
+            is_library: info.root.kind == LibraryRootKind::Library,
+            is_default: info.root.is_default && info.root.kind == LibraryRootKind::Library,
         }
     }
 
@@ -145,9 +143,10 @@ impl RootRow {
         }
     }
 
-    /// The confirm question for removing this folder.
-    pub fn remove_question(&self) -> String {
-        match self.files {
+    /// The confirm question for removing this folder. Says so when it's
+    /// the main library folder, and what happens to imports then.
+    pub fn remove_question(&self, main: &MainFolder) -> String {
+        let mut question = match self.files {
             0 => format!(
                 "Remove {} from Reelarr? Nothing on disk is touched.",
                 self.path
@@ -161,12 +160,143 @@ impl RootRow {
                     format!("{n} files")
                 }
             ),
+        };
+        match main {
+            MainFolder::Chosen(id) if *id == self.id => question.push_str(
+                " It's the main library folder: new imports wait until you pick another one.",
+            ),
+            MainFolder::Implicit(id) if *id == self.id => question.push_str(
+                " It's your only library folder: new imports wait until you add another one.",
+            ),
+            _ => {}
         }
+        question
     }
 
     /// Whether removing needs `forget_files`.
     pub fn forget_files(&self) -> bool {
         self.files > 0
+    }
+}
+
+/// Which library folder new imports go into.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MainFolder {
+    /// No library folders (manual-import folders don't count).
+    NoLibrary,
+    /// One library folder and no pick: it's used without asking.
+    Implicit(i64),
+    /// The folder picked as main (`is_default`).
+    Chosen(i64),
+    /// Two or more library folders and none picked: imports wait.
+    NeedsPick,
+}
+
+impl MainFolder {
+    pub fn of(roots: &[LibraryRootInfo]) -> Self {
+        let library: Vec<_> = roots
+            .iter()
+            .filter(|i| i.root.kind == LibraryRootKind::Library)
+            .collect();
+        if let Some(main) = library.iter().find(|i| i.root.is_default) {
+            return Self::Chosen(main.root.id.0);
+        }
+        match library.as_slice() {
+            [] => Self::NoLibrary,
+            [only] => Self::Implicit(only.root.id.0),
+            _ => Self::NeedsPick,
+        }
+    }
+
+    /// The folder imports go into, picked or implicit.
+    pub fn id(self) -> Option<i64> {
+        match self {
+            Self::Implicit(id) | Self::Chosen(id) => Some(id),
+            Self::NoLibrary | Self::NeedsPick => None,
+        }
+    }
+
+    /// Whether `row` gets a "Make main library folder" button: library
+    /// folders only, when there's a choice to make, never the current one.
+    pub fn can_pick(self, row: &RootRow) -> bool {
+        row.is_library
+            && match self {
+                Self::NeedsPick => true,
+                Self::Chosen(id) => id != row.id,
+                Self::NoLibrary | Self::Implicit(_) => false,
+            }
+    }
+
+    /// The tag on the main folder's row, in words.
+    pub fn tag(self, row: &RootRow) -> Option<&'static str> {
+        match self {
+            Self::Chosen(id) if id == row.id => Some("Main library folder"),
+            Self::Implicit(id) if id == row.id => Some("Main library"),
+            _ => None,
+        }
+    }
+}
+
+pub const PICK_MAIN_TITLE: &str = "Pick a main library folder";
+pub const PICK_MAIN_WAITING: &str = "Waiting for you to pick a main library folder — finished downloads stay ready for import until you do.";
+
+/// The prompt when several library folders exist and none is main.
+pub fn pick_main_message(roots: &[LibraryRootInfo]) -> String {
+    let n = roots
+        .iter()
+        .filter(|i| i.root.kind == LibraryRootKind::Library)
+        .count();
+    format!(
+        "You have {n} library folders. Which one is the main library folder, the one new imports go into? {PICK_MAIN_WAITING}"
+    )
+}
+
+/// What The Back Room says when downloads are waiting to be imported, by
+/// the state of the library folders: `(title, message)`, or `None` when
+/// imports have somewhere to go.
+pub fn import_wait(main: MainFolder) -> Option<(&'static str, &'static str)> {
+    match main {
+        MainFolder::NeedsPick => Some((PICK_MAIN_TITLE, PICK_MAIN_WAITING)),
+        MainFolder::NoLibrary => Some((
+            "Add a library folder",
+            "Waiting for a library folder — finished downloads stay ready for import until you add one.",
+        )),
+        MainFolder::Implicit(_) | MainFolder::Chosen(_) => None,
+    }
+}
+
+/// `PUT /api/v1/library/roots/{id}/default`.
+pub fn root_default_path(id: i64) -> String {
+    format!("{ROOTS_PATH}/{id}/default")
+}
+
+/// Plain words for a failed folder change. Server text is only repeated
+/// for duplicates and overlaps, which quote the path that was typed.
+pub fn root_error(failure: &SendFailure) -> String {
+    let message = failure.message.as_deref().unwrap_or_default();
+    match failure.code() {
+        Some("invalid_path") if message.contains("not a folder") => {
+            "That path is a file, not a folder.".into()
+        }
+        Some("invalid_path") if message.contains(". or ..") => {
+            "The path can't contain . or .. parts.".into()
+        }
+        Some("invalid_path") if message.contains("absolute") => {
+            "Use the full path inside the Reelarr container, starting with /.".into()
+        }
+        Some("invalid_path") => "Reelarr can't use that path. Check it and try again.".into(),
+        Some("default_not_library") => {
+            "Only a library folder can be the main library folder, not a manual-import folder."
+                .into()
+        }
+        Some("not_found") => {
+            "That folder isn't set up in Reelarr anymore. The list has been refreshed.".into()
+        }
+        Some("root_has_files") => {
+            "Files were found in this folder since the list was read. Check the count and confirm again."
+                .into()
+        }
+        _ => action_error(failure, &["duplicate_root", "overlapping_root"]),
     }
 }
 
@@ -186,8 +316,14 @@ pub fn validate_root_path(path: &str) -> Result<String, &'static str> {
     Ok(path.to_string())
 }
 
-/// The add-folder request, or the problem with the form.
-pub fn new_root(path: &str, kind: &str, rescan: &str) -> Result<NewLibraryRoot, &'static str> {
+/// The add-folder request, or the problem with the form. `is_default` is
+/// only sent for a library folder.
+pub fn new_root(
+    path: &str,
+    kind: &str,
+    rescan: &str,
+    is_default: bool,
+) -> Result<NewLibraryRoot, &'static str> {
     let path = validate_root_path(path)?;
     let kind = kind_from_value(kind).ok_or("Choose what the folder holds.")?;
     let rescan_interval_secs = match rescan.parse::<u64>() {
@@ -198,6 +334,7 @@ pub fn new_root(path: &str, kind: &str, rescan: &str) -> Result<NewLibraryRoot, 
         path,
         kind,
         rescan_interval_secs,
+        is_default: is_default && kind == LibraryRootKind::Library,
     })
 }
 
@@ -437,6 +574,7 @@ mod tests {
                 path: "/srv/folder-a".into(),
                 kind: LibraryRootKind::ManualImport,
                 rescan_interval_secs: Some(DEFAULT_RESCAN_INTERVAL_SECS),
+                is_default: false,
             },
             health,
             health_checked_at: Some(0),
@@ -484,13 +622,18 @@ mod tests {
         assert_eq!(row.files_label(), "2 files on record");
         assert_eq!(row.checked, "Checked 1970-01-01 00:00 UTC");
         assert!(row.forget_files());
-        assert!(row.remove_question().contains("forgets the 2 files"));
-        assert!(row.remove_question().contains("not touched"));
+        let q = row.remove_question(&MainFolder::NoLibrary);
+        assert!(q.contains("forgets the 2 files"));
+        assert!(q.contains("not touched"));
 
         let empty = RootRow::of(&info(0, RootHealth::Unknown));
         assert!(!empty.forget_files());
         assert_eq!(empty.health.label(), "Not checked yet");
-        assert!(!empty.remove_question().contains("forgets"));
+        assert!(
+            !empty
+                .remove_question(&MainFolder::NoLibrary)
+                .contains("forgets")
+        );
         let mut never = info(1, RootHealth::Online);
         never.health_checked_at = None;
         never.root.rescan_interval_secs = None;
@@ -498,6 +641,128 @@ mod tests {
         assert_eq!(never.checked, "Never checked");
         assert_eq!(never.rescan, "No scheduled rescans");
         assert_eq!(never.files_label(), "1 file on record");
+    }
+
+    fn root(id: i64, kind: LibraryRootKind, is_default: bool) -> LibraryRootInfo {
+        let mut i = info(0, RootHealth::Online);
+        i.root.id = LibraryRootId(id);
+        i.root.path = format!("/srv/folder-{id}");
+        i.root.kind = kind;
+        i.root.is_default = is_default;
+        i
+    }
+
+    #[test]
+    fn main_folder_prompt_logic() {
+        use LibraryRootKind::{Library, ManualImport};
+        assert_eq!(MainFolder::of(&[]), MainFolder::NoLibrary);
+        // Manual-import folders never count.
+        assert_eq!(
+            MainFolder::of(&[root(1, ManualImport, false)]),
+            MainFolder::NoLibrary
+        );
+        // One library folder: main without asking, even beside imports.
+        let one = [root(1, Library, false), root(2, ManualImport, false)];
+        assert_eq!(MainFolder::of(&one), MainFolder::Implicit(1));
+        let main = MainFolder::of(&one);
+        assert_eq!(main.id(), Some(1));
+        let rows: Vec<_> = one.iter().map(RootRow::of).collect();
+        assert!(!main.can_pick(&rows[0]));
+        assert!(!main.can_pick(&rows[1]));
+        assert_eq!(main.tag(&rows[0]), Some("Main library"));
+        assert_eq!(main.tag(&rows[1]), None);
+        assert!(
+            rows[0]
+                .remove_question(&main)
+                .contains("only library folder")
+        );
+        // Two library folders, no pick: ask, on library rows only.
+        let many = [
+            root(1, Library, false),
+            root(2, Library, false),
+            root(3, ManualImport, false),
+        ];
+        let main = MainFolder::of(&many);
+        assert_eq!(main, MainFolder::NeedsPick);
+        assert_eq!(main.id(), None);
+        let rows: Vec<_> = many.iter().map(RootRow::of).collect();
+        assert!(main.can_pick(&rows[0]) && main.can_pick(&rows[1]));
+        assert!(!main.can_pick(&rows[2]));
+        assert!(rows.iter().all(|r| main.tag(r).is_none()));
+        let prompt = pick_main_message(&many);
+        assert!(prompt.contains("2 library folders"));
+        assert!(prompt.contains("stay ready for import"));
+        // Picked: marked in words, the others can still be picked.
+        let chosen = [root(1, Library, false), root(2, Library, true)];
+        let main = MainFolder::of(&chosen);
+        assert_eq!(main, MainFolder::Chosen(2));
+        let rows: Vec<_> = chosen.iter().map(RootRow::of).collect();
+        assert!(main.can_pick(&rows[0]));
+        assert!(!main.can_pick(&rows[1]));
+        assert_eq!(main.tag(&rows[1]), Some("Main library folder"));
+        assert!(rows[1].is_default);
+        let q = rows[1].remove_question(&main);
+        assert!(q.contains("main library folder"));
+        assert!(q.contains("wait until you pick another"));
+        assert!(!rows[0].remove_question(&main).contains("main library"));
+        // A stray default flag on a manual-import folder is ignored.
+        let stray = [root(1, ManualImport, true), root(2, Library, false)];
+        assert_eq!(MainFolder::of(&stray), MainFolder::Implicit(2));
+        assert!(!RootRow::of(&stray[0]).is_default);
+        assert_eq!(root_default_path(4), "/api/v1/library/roots/4/default");
+        // The Back Room only speaks up when imports have nowhere to go.
+        assert_eq!(
+            import_wait(MainFolder::NeedsPick).unwrap().1,
+            PICK_MAIN_WAITING
+        );
+        assert!(
+            import_wait(MainFolder::NoLibrary)
+                .unwrap()
+                .1
+                .contains("add one")
+        );
+        assert_eq!(import_wait(MainFolder::Implicit(1)), None);
+        assert_eq!(import_wait(MainFolder::Chosen(1)), None);
+    }
+
+    #[test]
+    fn folder_errors_in_plain_words() {
+        let fail = |status, code: &str, message: &str| SendFailure {
+            failure: crate::api::ApiFailure::Status {
+                status,
+                code: Some(code.into()),
+            },
+            message: Some(message.into()),
+        };
+        assert_eq!(
+            root_error(&fail(
+                400,
+                "invalid_path",
+                "/srv/x.mkv exists but is not a folder"
+            )),
+            "That path is a file, not a folder."
+        );
+        assert!(
+            root_error(&fail(
+                400,
+                "invalid_path",
+                "library folder must be an absolute path, got \"x\""
+            ))
+            .contains("starting with /")
+        );
+        assert!(root_error(&fail(400, "default_not_library", "x")).contains("manual-import"));
+        assert!(
+            root_error(&fail(404, "not_found", "library folder not found")).contains("anymore")
+        );
+        assert_eq!(
+            root_error(&fail(
+                409,
+                "duplicate_root",
+                "/srv/a is already a library folder"
+            )),
+            "/srv/a is already a library folder."
+        );
+        assert!(!root_error(&fail(500, "internal", "db")).contains("db"));
     }
 
     #[test]
@@ -517,11 +782,18 @@ mod tests {
         assert!(validate_root_path("srv/a").is_err());
         assert!(validate_root_path("/srv/../etc").is_err());
         assert!(validate_root_path("/srv/./a").is_err());
-        let new = new_root("/srv/a", "library", "3600").unwrap();
+        let new = new_root("/srv/a", "library", "3600", true).unwrap();
         assert_eq!(new.kind, LibraryRootKind::Library);
         assert_eq!(new.rescan_interval_secs, Some(3600));
-        assert!(new_root("/srv/a", "shelf", "3600").is_err());
-        assert!(new_root("/srv/a", "library", "5").is_err());
+        assert!(new.is_default);
+        // Never asks the server to make a manual-import folder main.
+        assert!(
+            !new_root("/srv/a", "manual_import", "3600", true)
+                .unwrap()
+                .is_default
+        );
+        assert!(new_root("/srv/a", "shelf", "3600", false).is_err());
+        assert!(new_root("/srv/a", "library", "5", false).is_err());
         assert_eq!(
             kind_from_value("manual_import"),
             Some(LibraryRootKind::ManualImport)

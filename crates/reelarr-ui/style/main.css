@@ -2035,6 +2035,21 @@ a { color: var(--color-primary); }
   text-transform: uppercase;
   color: var(--color-outline-text);
 }
+.vault-main-tag {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-xs);
+  margin-left: var(--space-sm);
+  padding: 0 var(--space-xs);
+  border: 1px solid var(--color-primary);
+  border-radius: var(--radius-sm);
+  color: var(--color-primary);
+  font: var(--type-label-md);
+  letter-spacing: var(--tracking-label-md);
+  font-weight: 700;
+  text-transform: uppercase;
+  vertical-align: middle;
+}
 .vault-kind { color: var(--color-tertiary-container); font-weight: 700; }
 .vault-note { font: var(--type-body-sm); color: var(--color-on-surface); }
 .vault-problem .vault-note { color: var(--color-error); }

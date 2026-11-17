@@ -17,9 +17,11 @@ use crate::components::icon::{Icon, IconName};
 use crate::jobs::{
     Applied, Feed, Frame, JOBS_PATH, JobAction, JobCard, PRIORITIES, Telemetry, apply_event,
     is_finished, parse_frame, priority_from_value, priority_label, priority_path, priority_value,
-    telemetry,
+    telemetry, waiting_for_import,
 };
+use crate::library::SETTINGS_PATH;
 use crate::playback::SIGN_IN_PATH;
+use crate::settings::{MainFolder, import_wait};
 use crate::staff::{Gate, LoadProblem, SESSION_PATH, action_error, gate};
 
 /// Job error codes whose static server message a card may repeat.
@@ -328,6 +330,27 @@ fn JobBoard() -> AnyView {
         })
     });
     let stats = Signal::derive(move || jobs.with(|list| list.as_deref().map(telemetry)));
+
+    // When downloads are waiting to be imported, check whether they have a
+    // library folder to go to.
+    let waiting =
+        Memo::new(move |_| jobs.with(|list| list.as_deref().is_some_and(waiting_for_import)));
+    let main = RwSignal::new(None::<MainFolder>);
+    #[cfg(not(feature = "ssr"))]
+    Effect::new(move |_| {
+        if waiting.get() {
+            leptos::task::spawn_local(async move {
+                if let Ok(list) =
+                    get_json::<Vec<reelarr_types::LibraryRootInfo>>(crate::library::ROOTS_PATH)
+                        .await
+                {
+                    main.set(Some(MainFolder::of(&list)));
+                }
+            });
+        } else {
+            main.set(None);
+        }
+    });
     let feed_state = Signal::derive(move || Some(feed.get()));
 
     view! {
@@ -349,6 +372,21 @@ fn JobBoard() -> AnyView {
             })}
         </div>
         {move || problem.get().map(|problem| view! { <Problem problem has_jobs=jobs.with(Option::is_some) /> })}
+        {move || {
+            let (title, message) = main.get().filter(|_| waiting.get()).and_then(import_wait)?;
+            Some(view! {
+                <div class="lab-card lab-card-alert" role="status">
+                    <p class="lab-card-title">
+                        <Icon name=IconName::Info />
+                        {title}
+                    </p>
+                    <p>{message}</p>
+                    <p class="lab-actions">
+                        <a class="button primary" href=SETTINGS_PATH>"Go to Employees Only"</a>
+                    </p>
+                </div>
+            })
+        }}
         <DeckFrame>
             {move || match jobs.with(|list| list.as_ref().map(Vec::is_empty)) {
                 None if problem.get().is_none() => view! {
