@@ -1,6 +1,6 @@
 [package]
 name = "reelarr-par2"
-description = "Clean-room PAR2 2.0 verification (no repair) for Reelarr downloads"
+description = "Clean-room PAR2 2.0 verification and repair for Reelarr downloads"
 version.workspace = true
 edition.workspace = true
 license.workspace = true

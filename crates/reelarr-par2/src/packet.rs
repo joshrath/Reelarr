@@ -59,6 +59,18 @@ pub struct SetPackets {
     pub slices: HashMap<FileId, Vec<SliceSum>>,
     /// Recovery slice exponents mapped to their data length.
     pub recovery: BTreeMap<u32, u64>,
+    /// Where each accepted recovery slice's data starts on disk, so repair can
+    /// read it by offset instead of holding it in memory.
+    pub recovery_at: BTreeMap<u32, RecoveryLoc>,
+}
+
+/// Location of one recovery slice's data (after the 4-byte exponent).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct RecoveryLoc {
+    /// The `source` value passed to [`Packets::scan_source`].
+    pub source: usize,
+    /// Byte offset of the slice data within that stream.
+    pub offset: u64,
 }
 
 /// Packets from any number of PAR2 files, grouped by recovery set.
@@ -99,7 +111,18 @@ impl Packets {
     /// skipped; only cancellation, budgets and I/O errors return `Err`.
     pub fn scan<R: Read + Seek>(
         &mut self,
+        input: R,
+        limits: &Limits,
+        cancel: &AtomicBool,
+    ) -> Result<(), Error> {
+        self.scan_source(input, 0, limits, cancel)
+    }
+
+    /// Like [`Packets::scan`], tagging recovery slice locations with `source`.
+    pub fn scan_source<R: Read + Seek>(
+        &mut self,
         mut input: R,
+        source: usize,
         limits: &Limits,
         cancel: &AtomicBool,
     ) -> Result<(), Error> {
@@ -114,7 +137,11 @@ impl Packets {
             if !read_full(&mut input, &mut header)? {
                 return Ok(());
             }
-            match self.packet(&mut input, &header, limits, cancel)? {
+            let at = RecoveryLoc {
+                source,
+                offset: pos + HEADER + 4,
+            };
+            match self.packet(&mut input, &header, at, limits, cancel)? {
                 Some(length) => pos += length,
                 None => {
                     if header.starts_with(MAGIC) {
@@ -135,6 +162,7 @@ impl Packets {
         &mut self,
         input: &mut R,
         header: &[u8; HEADER as usize],
+        at: RecoveryLoc,
         limits: &Limits,
         cancel: &AtomicBool,
     ) -> Result<Option<u64>, Error> {
@@ -203,12 +231,14 @@ impl Packets {
             k if k == IFSC => self.ifsc(set, &body, limits)?,
             k if k == RECOVERY => match exponent {
                 Some(e) => {
+                    let data_len = body_len - 4;
                     let entry = self.sets.entry(set).or_default();
                     match entry.recovery.entry(e) {
                         BEntry::Vacant(v) => {
-                            v.insert(body_len - 4);
+                            v.insert(data_len);
+                            entry.recovery_at.insert(e, at);
                         }
-                        BEntry::Occupied(o) if *o.get() != body_len - 4 => self.conflicts += 1,
+                        BEntry::Occupied(o) if *o.get() != data_len => self.conflicts += 1,
                         BEntry::Occupied(_) => {}
                     }
                     true
