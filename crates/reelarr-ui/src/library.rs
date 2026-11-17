@@ -172,8 +172,9 @@ pub fn floor_state(result: Result<Vec<LibraryRootInfo>, ApiFailure>) -> FloorSta
 pub enum ShelfSummary {
     /// No library folders are set up.
     NoFolders,
-    /// Folders exist but no files are recorded under them.
-    NoFiles,
+    /// Folders exist but no files are recorded under them. `unreachable`
+    /// folders can't be read right now.
+    NoFiles { unreachable: usize },
     /// Files are on record, but the listing isn't available to show them.
     OnRecord { files: u64, unreachable: usize },
     /// Every folder that has files is unreachable.
@@ -185,10 +186,10 @@ pub fn shelf_summary(folders: &[Folder]) -> ShelfSummary {
         return ShelfSummary::NoFolders;
     }
     let files: u64 = folders.iter().map(|f| f.file_count).sum();
-    if files == 0 {
-        return ShelfSummary::NoFiles;
-    }
     let unreachable = folders.iter().filter(|f| !f.health.is_available()).count();
+    if files == 0 {
+        return ShelfSummary::NoFiles { unreachable };
+    }
     let reachable_files: u64 = folders
         .iter()
         .filter(|f| f.health.is_available())
@@ -202,10 +203,20 @@ pub fn shelf_summary(folders: &[Folder]) -> ShelfSummary {
 }
 
 impl ShelfSummary {
+    /// Whether any library folder can't be read, so the card is styled as
+    /// an alert. The message always says so in words too.
+    pub fn is_alert(&self) -> bool {
+        match self {
+            Self::NoFolders => false,
+            Self::NoFiles { unreachable } | Self::OnRecord { unreachable, .. } => *unreachable > 0,
+            Self::AllUnreachable { .. } => true,
+        }
+    }
+
     pub fn title(&self) -> &'static str {
         match self {
             Self::NoFolders => "The shelves are bare",
-            Self::NoFiles => "No tapes on the shelves yet",
+            Self::NoFiles { .. } => "No tapes on the shelves yet",
             Self::OnRecord { .. } => "Shelf listing not available yet",
             Self::AllUnreachable { .. } => "The library is offline",
         }
@@ -216,22 +227,20 @@ impl ShelfSummary {
             Self::NoFolders => "No library folders are set up yet. Add one in Employees Only \
                  and its movies will be stocked here."
                 .into(),
-            Self::NoFiles => "Your library folders are set up, but no movie files have been \
-                 recorded in them yet."
-                .into(),
+            Self::NoFiles { unreachable } => {
+                let mut message = "Your library folders are set up, but no movie files have \
+                     been recorded in them yet."
+                    .to_string();
+                push_unreachable(&mut message, *unreachable);
+                message
+            }
             Self::OnRecord { files, unreachable } => {
                 let mut message = format!(
                     "Reelarr has {} in your library folders, but this version can't list \
                      them on the shelves yet.",
                     count_label(*files)
                 );
-                match unreachable {
-                    0 => {}
-                    1 => message.push_str(" One library folder can't be read right now."),
-                    n => {
-                        message.push_str(&format!(" {n} library folders can't be read right now."))
-                    }
-                }
+                push_unreachable(&mut message, *unreachable);
                 message
             }
             Self::AllUnreachable { files } => format!(
@@ -240,6 +249,15 @@ impl ShelfSummary {
                 count_label(*files)
             ),
         }
+    }
+}
+
+/// Adds how many library folders can't be read, if any.
+fn push_unreachable(message: &mut String, unreachable: usize) {
+    match unreachable {
+        0 => {}
+        1 => message.push_str(" One library folder can't be read right now."),
+        n => message.push_str(&format!(" {n} library folders can't be read right now.")),
     }
 }
 
@@ -343,6 +361,12 @@ pub const CASE_NOT_FOUND_MESSAGE: &str = "There's no tape with that number on th
 
 /// The main message for a case notice. Same words as the player, except
 /// for not found.
+/// Whether a case notice offers "Try again": a failed lookup, or an
+/// offline library folder that may be back after the share is remounted.
+pub fn case_offers_retry(notice: &Notice) -> bool {
+    matches!(notice, Notice::TryAgain | Notice::Offline)
+}
+
 pub fn case_notice_message(notice: &Notice) -> String {
     match notice {
         Notice::NotFound => CASE_NOT_FOUND_MESSAGE.into(),
@@ -486,7 +510,25 @@ mod tests {
             RootHealth::Online,
             0,
         )]);
-        assert_eq!(shelf_summary(&f), ShelfSummary::NoFiles);
+        let summary = shelf_summary(&f);
+        assert_eq!(summary, ShelfSummary::NoFiles { unreachable: 0 });
+        assert!(!summary.is_alert());
+    }
+
+    #[test]
+    fn an_unreachable_empty_folder_is_an_alert_in_words() {
+        let f = folders(vec![
+            root(1, LibraryRootKind::Library, RootHealth::Online, 0),
+            root(2, LibraryRootKind::Library, offline(), 0),
+        ]);
+        let summary = shelf_summary(&f);
+        assert_eq!(summary, ShelfSummary::NoFiles { unreachable: 1 });
+        assert!(summary.is_alert());
+        assert!(
+            summary
+                .message()
+                .contains("One library folder can't be read right now.")
+        );
     }
 
     #[test]
@@ -503,6 +545,7 @@ mod tests {
                 unreachable: 1
             }
         );
+        assert!(summary.is_alert());
         assert!(summary.message().contains("3 files on record"));
         assert!(
             summary
@@ -516,6 +559,7 @@ mod tests {
         let f = folders(vec![root(1, LibraryRootKind::Library, offline(), 1)]);
         let summary = shelf_summary(&f);
         assert_eq!(summary, ShelfSummary::AllUnreachable { files: 1 });
+        assert!(summary.is_alert());
         assert!(summary.message().contains("1 file on record"));
         assert!(summary.message().contains("mounted"));
     }
@@ -713,6 +757,14 @@ mod tests {
             case_state(Some(4), Err(err(500, "lookup_failed"))),
             CaseState::Notice(Notice::TryAgain)
         );
+    }
+
+    #[test]
+    fn offline_and_failed_cases_offer_try_again() {
+        assert!(case_offers_retry(&Notice::Offline));
+        assert!(case_offers_retry(&Notice::TryAgain));
+        assert!(!case_offers_retry(&Notice::NotFound));
+        assert!(!case_offers_retry(&Notice::SignIn));
     }
 
     #[test]

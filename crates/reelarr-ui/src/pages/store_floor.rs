@@ -98,7 +98,7 @@ fn Shelf(children: Children) -> impl IntoView {
 
 #[component]
 fn ShelfMessage(summary: ShelfSummary) -> impl IntoView {
-    let alert = matches!(summary, ShelfSummary::AllUnreachable { .. });
+    let alert = summary.is_alert();
     let action = matches!(summary, ShelfSummary::NoFolders).then(|| {
         view! {
             <p class="shelf-actions">
@@ -110,6 +110,15 @@ fn ShelfMessage(summary: ShelfSummary) -> impl IntoView {
     });
     view! {
         <div class="shelf-card" class:shelf-card-alert=alert role=alert.then_some("alert")>
+            {alert
+                .then(|| {
+                    view! {
+                        <p class="shelf-card-flag label">
+                            <Icon name=IconName::Error />
+                            "Library folder problem"
+                        </p>
+                    }
+                })}
             <p class="shelf-card-title">{summary.title()}</p>
             <p>{summary.message()}</p>
             {action}

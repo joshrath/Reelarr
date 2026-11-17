@@ -8,7 +8,7 @@ use leptos_meta::Title;
 
 use crate::components::icon::{Icon, IconName};
 use crate::records::{
-    EMPTY_LINK_LABEL, EMPTY_MESSAGE, EMPTY_TITLE, LEDE, NOTE, OVERLINE, SETTINGS_PATH,
+    EMPTY_LINK_LABEL, EMPTY_MESSAGE, EMPTY_TITLE, LEDE, LIBRARY_FOLDERS_PATH, NOTE, OVERLINE,
     STATUS_LABEL, STATUS_VALUE, SUBTITLE, TITLE,
 };
 
@@ -43,7 +43,10 @@ pub fn RecordCornerPage() -> impl IntoView {
                 <h2 id="records-crate-title" class="records-crate-title">{EMPTY_TITLE}</h2>
                 <p class="records-crate-message">{EMPTY_MESSAGE}</p>
                 <p class="records-crate-actions">
-                    <a class="button primary" href=SETTINGS_PATH>
+                    // A full page load, so the browser scrolls to the panel:
+                    // on a client-side change the panel isn't drawn yet when
+                    // the router looks for the anchor.
+                    <a class="button primary" href=LIBRARY_FOLDERS_PATH rel="external">
                         <Icon name=IconName::HardDrive />
                         {EMPTY_LINK_LABEL}
                     </a>

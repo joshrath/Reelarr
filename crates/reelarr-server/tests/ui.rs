@@ -446,12 +446,15 @@ async fn record_corner_is_an_honest_empty_crate() {
     // The empty crate says music isn't supported and links to the
     // library folders.
     assert!(body.contains("The crates are empty"));
-    assert!(body.contains("Music libraries aren"));
-    assert!(body.contains("once music library support lands"));
+    assert!(body.contains(
+        "Music libraries aren't supported yet, so there's nothing to flip through here. \
+         Reelarr's library folders hold movies for now."
+    ));
+    assert!(body.contains("The Record Corner fills in once music library support lands."));
     // The page itself (not just the nav) links to Employees Only.
     let page = &body[body.find(r#"<main id="main-content""#).unwrap()..];
     let page = &page[..page.find("</main>").unwrap()];
-    assert!(page.contains(r#"href="/employees-only""#));
+    assert!(page.contains(r#"href="/employees-only#roots-title" rel="external""#));
     assert!(page.contains("Library folders in Employees Only"));
     // No sample records: no covers, catalogue numbers, formats or the
     // design's deck and EQ controls.

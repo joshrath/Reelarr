@@ -3,8 +3,8 @@
 //! format badges, and no API calls. Plain data, so it can be tested
 //! without a browser.
 
-/// Where library folders are set up.
-pub const SETTINGS_PATH: &str = "/employees-only";
+/// The library folders panel on Employees Only, where folders are added.
+pub const LIBRARY_FOLDERS_PATH: &str = "/employees-only#roots-title";
 
 pub const TITLE: &str = "The Record Corner";
 /// The themed line under the page title.
@@ -43,10 +43,10 @@ mod tests {
     use super::*;
 
     #[test]
-    fn says_music_is_not_supported_and_points_to_settings() {
+    fn says_music_is_not_supported_and_points_to_library_folders() {
         assert!(EMPTY_MESSAGE.contains("Music libraries aren't supported yet"));
         assert!(NOTE.contains("once music library support lands"));
-        assert_eq!(SETTINGS_PATH, "/employees-only");
+        assert_eq!(LIBRARY_FOLDERS_PATH, "/employees-only#roots-title");
         assert!(EMPTY_LINK_LABEL.contains("Employees Only"));
     }
 
