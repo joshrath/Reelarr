@@ -86,3 +86,26 @@ pub fn apply_transition(
     job.state = to;
     Ok(())
 }
+
+/// Reconciles a cancel that landed while an import was running, once that
+/// import has succeeded: `Cancelled → Completed`. This is not a lifecycle edge
+/// ([`validate_transition`] still rejects it). Only the import that claimed
+/// the job (`ReadyForImport → Importing`) takes it, through
+/// [`super::JobStore::complete_cancelled_import`], because by then the movie
+/// is already in the library. Errors (any state but `Cancelled`) leave the
+/// snapshot unchanged.
+pub fn apply_cancelled_import_completion(job: &mut Job) -> Result<(), TransitionError> {
+    if job.state != JobState::Cancelled {
+        return Err(TransitionError::Illegal {
+            from: job.state,
+            to: JobState::Completed,
+        });
+    }
+    job.resume_state = None;
+    job.progress.speed_bps = 0;
+    job.progress.eta_secs = None;
+    job.progress.stage_fraction = None;
+    job.failure = None;
+    job.state = JobState::Completed;
+    Ok(())
+}

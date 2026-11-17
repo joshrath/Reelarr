@@ -58,7 +58,11 @@
 //!
 //! - `Imported`: the job is `Completed`, then the source cleanup for its
 //!   download source runs (built-in NZB: staging and published folder). Cleanup
-//!   runs only after `Completed`, never after a failure or a cancel.
+//!   runs only after `Completed`, never after a failure. If the job was
+//!   cancelled while the import ran and the import still succeeded, the
+//!   import wins: the movie stays in the library, the job is reconciled to
+//!   `Completed` (`JobStore::complete_cancelled_import`), the normal cleanup
+//!   runs, and a discard deferred meanwhile is dropped.
 //! - Retryable failure: the job goes back to `ReadyForImport` and waits
 //!   `import_retry` (1, 5, 15 minutes, then every 30 minutes) before the next
 //!   attempt. The wait is kept in memory; a restart tries again at once.
@@ -69,6 +73,13 @@
 //!   when they changed and fails retryably is tried again at once too.
 //! - Terminal failure: `Failed` with the handler's code (`Other` if none).
 //! - No match: `Failed` with `NoMatch`.
+//! - Job-store error after the claim: `attempt_import` puts the job back in
+//!   `ReadyForImport` (or `Failed`), and it waits like a retryable failure.
+//!   If even that write fails, the job is remembered as stranded in
+//!   `Importing` and the scheduler moves it back to `ReadyForImport` once
+//!   its wait is over, instead of leaving it until the next restart.
+//!
+//! Cancelling or discarding a job drops its import wait.
 //!
 //! Without a handler a finished download stops at `ReadyForImport`.
 //!
@@ -285,6 +296,9 @@ struct State {
     importing: HashSet<JobId>,
     /// Retry wait after a retryable import failure.
     import_held: HashMap<JobId, Hold>,
+    /// Jobs an import left in `Importing` because the job store failed; the
+    /// scheduler moves them back to `ReadyForImport` after their wait.
+    stranded: HashSet<JobId>,
     /// Bumped by [`Supervisor::library_roots_changed`].
     roots_epoch: u64,
     /// `roots_epoch` when each running import started.
@@ -458,6 +472,7 @@ impl Supervisor {
             .jobs
             .transition(id, JobState::Cancelled, None)
             .await?;
+        self.inner.forget_import_wait(id);
         self.inner.fire(id);
         self.wake();
         Ok(job)
@@ -508,10 +523,19 @@ impl Supervisor {
         }
         {
             let mut state = lock(&self.inner.state);
+            state.import_held.remove(&id);
+            state.stranded.remove(&id);
             if state.active.contains_key(&id) || state.importing.contains(&id) {
                 state.discard.insert(id);
                 return Ok(Discarded::WhenStopped);
             }
+        }
+        // An import that succeeded after the cancel reconciles the job to
+        // Completed before it leaves the registry, so a re-read now sees it
+        // and its files are left to that import's cleanup.
+        let job = self.inner.jobs.get(id).await?;
+        if job.state != JobState::Cancelled {
+            return Err(DiscardError::NotCancelled(job.state));
         }
         self.inner.files.discard(id).await?;
         Ok(Discarded::Now)
@@ -536,6 +560,21 @@ impl Supervisor {
     pub fn importing(&self) -> Vec<JobId> {
         let state = lock(&self.inner.state);
         let mut jobs: Vec<_> = state.importing.iter().copied().collect();
+        jobs.sort();
+        jobs
+    }
+
+    /// Jobs waiting on the import retry clock (or stranded in `Importing`).
+    pub fn import_waiting(&self) -> Vec<JobId> {
+        let state = lock(&self.inner.state);
+        let mut jobs: Vec<_> = state
+            .import_held
+            .keys()
+            .chain(&state.stranded)
+            .copied()
+            .collect::<HashSet<_>>()
+            .into_iter()
+            .collect();
         jobs.sort();
         jobs
     }
@@ -575,6 +614,13 @@ fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
 }
 
 impl Inner {
+    /// Drop a job's import retry wait (and stranded mark).
+    fn forget_import_wait(&self, id: JobId) {
+        let mut state = lock(&self.state);
+        state.import_held.remove(&id);
+        state.stranded.remove(&id);
+    }
+
     fn fire(&self, id: JobId) {
         if let Some(active) = lock(&self.state).active.get(&id) {
             active.cancel.cancel();
@@ -786,6 +832,7 @@ impl Inner {
                 return;
             }
         };
+        self.unstrand(&queue).await;
         for job in queue.into_iter().filter(importable) {
             let id = job.id;
             // Register before re-reading the job, so a cancel that commits
@@ -835,6 +882,66 @@ impl Inner {
                 (id, result)
             });
             task_jobs.insert(handle.id(), id);
+        }
+    }
+
+    /// Move jobs an import left stranded in `Importing` (the job store failed
+    /// and even releasing the claim failed) back to `ReadyForImport` once
+    /// their wait is over. They are imported on the next pass.
+    async fn unstrand(&self, queue: &[Job]) {
+        let due: Vec<JobId> = {
+            let mut state = lock(&self.state);
+            if state.stranded.is_empty() {
+                return;
+            }
+            let now = Instant::now();
+            let mut due = Vec::new();
+            for id in state.stranded.clone() {
+                let still = queue
+                    .iter()
+                    .any(|j| j.id == id && j.state == JobState::Importing);
+                if !still {
+                    // Moved on (cancelled, recovered, removed): nothing to do.
+                    state.stranded.remove(&id);
+                    if !queue.iter().any(|j| j.id == id && importable(j)) {
+                        state.import_held.remove(&id);
+                    }
+                } else if !state.importing.contains(&id)
+                    && state.import_held.get(&id).is_none_or(|h| h.until <= now)
+                {
+                    due.push(id);
+                }
+            }
+            due
+        };
+        for id in due {
+            let result = self
+                .jobs
+                .transition(id, JobState::ReadyForImport, None)
+                .await;
+            let mut state = lock(&self.state);
+            match result {
+                Ok(_) => {
+                    tracing::info!(job = %id, "stranded import returned to ReadyForImport");
+                    state.stranded.remove(&id);
+                    self.wake.notify_one();
+                }
+                Err(JobStoreError::Transition(_)) => {
+                    state.stranded.remove(&id);
+                }
+                Err(error) => {
+                    tracing::error!(job = %id, %error, "could not release a stranded import; retrying later");
+                    let failures = state.import_held.get(&id).map_or(0, |h| h.failures) + 1;
+                    let delay = self.config.import_retry_delay(failures);
+                    state.import_held.insert(
+                        id,
+                        Hold {
+                            until: Instant::now() + delay,
+                            failures,
+                        },
+                    );
+                }
+            }
         }
     }
 
@@ -898,6 +1005,12 @@ impl Inner {
                 (id, Err(error))
             }
         };
+        let completed = matches!(
+            &result,
+            Ok(Ok(ImportAttempt::Finished(job))) if job.state == JobState::Completed
+        );
+        // The job store failed and the job may still be in Importing.
+        let mut stranded = false;
         let retry = match result {
             Ok(Ok(ImportAttempt::Finished(job))) => {
                 match job.state {
@@ -922,6 +1035,7 @@ impl Inner {
             }
             Ok(Err(error)) => {
                 tracing::error!(job = %id, %error, "import could not record its result; retrying later");
+                stranded = true;
                 true
             }
             Err(error) => {
@@ -931,10 +1045,18 @@ impl Inner {
                     message: "The importer crashed while processing this job".into(),
                     retryable: true,
                 };
-                self.jobs
+                match self
+                    .jobs
                     .transition(id, JobState::Failed, Some(failure))
                     .await
-                    .is_err()
+                {
+                    Ok(_) | Err(JobStoreError::Transition(_)) => false,
+                    Err(error) => {
+                        tracing::error!(job = %id, %error, "could not fail the crashed import");
+                        stranded = true;
+                        true
+                    }
+                }
             }
         };
         let deferred = {
@@ -958,7 +1080,20 @@ impl Inner {
             } else {
                 state.import_held.remove(&id);
             }
-            !state.active.contains_key(&id) && state.discard.remove(&id)
+            if stranded {
+                state.stranded.insert(id);
+            } else {
+                state.stranded.remove(&id);
+            }
+            if completed {
+                // A cancel landed during an import that then succeeded: the
+                // job is Completed and its cleanup already ran, so a discard
+                // deferred meanwhile must not run too.
+                state.discard.remove(&id);
+                false
+            } else {
+                !state.active.contains_key(&id) && state.discard.remove(&id)
+            }
         };
         if deferred {
             self.discard_now(id).await;

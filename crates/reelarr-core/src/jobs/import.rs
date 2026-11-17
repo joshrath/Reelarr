@@ -7,7 +7,7 @@ use std::{
 use async_trait::async_trait;
 use reelarr_types::{MediaFileId, MovieId};
 
-use super::{Failure, FailureCode, Job, JobId, JobState, JobStore, JobStoreError};
+use super::{Failure, FailureCode, Job, JobId, JobState, JobStore, JobStoreError, TransitionError};
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub enum DownloadSource {
@@ -135,13 +135,31 @@ async fn import_once(
     mapping: PathMapping,
     retry_in_place: bool,
 ) -> Result<ImportAttempt, JobStoreError> {
-    use ImportAttempt::Finished;
     let id = download.job_id;
     let snapshot = store.get(id).await?;
     if snapshot.state == JobState::Completed {
-        return Ok(Finished(snapshot));
+        return Ok(ImportAttempt::Finished(snapshot));
     }
     store.transition(id, JobState::Importing, None).await?;
+    match claimed(store, handler, cleanups, download, mapping, retry_in_place).await {
+        // The job store failed after the claim: do not leave the job in
+        // Importing until the next restart.
+        Err(JobStoreError::Backend(error)) => unclaim(store, id, error, retry_in_place).await,
+        other => other,
+    }
+}
+
+/// Everything after the `ReadyForImport → Importing` claim.
+async fn claimed(
+    store: &dyn JobStore,
+    handler: &dyn ImportHandler,
+    cleanups: &CleanupRegistry,
+    download: CompletedDownload,
+    mapping: PathMapping,
+    retry_in_place: bool,
+) -> Result<ImportAttempt, JobStoreError> {
+    use ImportAttempt::Finished;
+    let id = download.job_id;
     if mapping == PathMapping::Unmapped || !download.output_path.is_absolute() {
         return store
             .transition(
@@ -172,7 +190,34 @@ async fn import_once(
     }
     match handler.import(download.clone()).await {
         ImportResult::Imported { .. } => {
-            let completed = store.transition(id, JobState::Completed, None).await?;
+            let completed = match store.transition(id, JobState::Completed, None).await {
+                Ok(job) => job,
+                // A cancel landed while the import ran. The movie is in the
+                // library now, so the import wins: Completed, then the normal
+                // cleanup. Only this claim can see Cancelled here.
+                Err(JobStoreError::Transition(TransitionError::Illegal {
+                    from: JobState::Cancelled,
+                    ..
+                })) => {
+                    let job = store.complete_cancelled_import(id).await?;
+                    tracing::info!(job_id = %id, "cancelled during a successful import; kept it as completed");
+                    match store
+                        .message(
+                            id,
+                            "The import finished before the cancel took effect; the movie was kept"
+                                .into(),
+                        )
+                        .await
+                    {
+                        Ok(job) => job,
+                        Err(error) => {
+                            tracing::warn!(job_id = %id, %error, "Could not emit reconcile message");
+                            job
+                        }
+                    }
+                }
+                Err(error) => return Err(error),
+            };
             let result = match cleanups.handlers.get(&download.source) {
                 Some(cleanup) => cleanup.on_imported(id, &download.output_path).await,
                 None => Err(CleanupError(Box::new(std::io::Error::other(
@@ -230,5 +275,39 @@ async fn import_once(
             )
             .await
             .map(Finished),
+    }
+}
+
+/// A job-store write failed after the claim. Put the job back in
+/// `ReadyForImport` (the restart-recovery edge; [`attempt_import`] reports a
+/// retry, so its caller's normal retry wait applies), or `Failed` (retryable)
+/// if that write fails too. A job that has moved on (cancelled, say) is left
+/// alone. [`run_import`] and a job that is still stuck get the store error.
+async fn unclaim(
+    store: &dyn JobStore,
+    id: JobId,
+    error: Box<dyn std::error::Error + Send + Sync>,
+    retry_in_place: bool,
+) -> Result<ImportAttempt, JobStoreError> {
+    tracing::warn!(job_id = %id, %error, "Job store failed during import; releasing the claim");
+    let failure = Failure {
+        code: FailureCode::Other,
+        message: "The import's result could not be saved".into(),
+        retryable: true,
+    };
+    match store.transition(id, JobState::ReadyForImport, None).await {
+        Ok(job) if retry_in_place => return Ok(ImportAttempt::Retry { job, failure }),
+        Ok(_) | Err(JobStoreError::Transition(_)) => return Err(JobStoreError::Backend(error)),
+        Err(again) => {
+            tracing::warn!(job_id = %id, error = %again, "Could not return the job to ReadyForImport");
+        }
+    }
+    match store.transition(id, JobState::Failed, Some(failure)).await {
+        Ok(job) if retry_in_place => Ok(ImportAttempt::Finished(job)),
+        Ok(_) | Err(JobStoreError::Transition(_)) => Err(JobStoreError::Backend(error)),
+        Err(again) => {
+            tracing::error!(job_id = %id, error = %again, "Could not fail the job either; it stays Importing");
+            Err(JobStoreError::Backend(error))
+        }
     }
 }

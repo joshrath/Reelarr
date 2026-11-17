@@ -8,7 +8,10 @@ use tokio::sync::RwLock;
 
 use super::{
     EventHub, Failure, Job, JobEvent, JobEventKind, JobId, JobState, Priority, Progress,
-    TransitionError, model::now, recover_after_restart, transition::apply_transition,
+    TransitionError,
+    model::now,
+    recover_after_restart,
+    transition::{apply_cancelled_import_completion, apply_transition},
 };
 
 #[derive(Debug, thiserror::Error)]
@@ -49,6 +52,11 @@ pub trait JobStore: Send + Sync {
         to: JobState,
         failure: Option<Failure>,
     ) -> Result<Job, JobStoreError>;
+    /// `Cancelled → Completed` for a job whose cancel landed while its import
+    /// ran and the import then succeeded (see
+    /// [`super::apply_cancelled_import_completion`]). Only the import that
+    /// claimed the job may call this; any other state is a transition error.
+    async fn complete_cancelled_import(&self, id: JobId) -> Result<Job, JobStoreError>;
     async fn update_progress(&self, id: JobId, progress: Progress) -> Result<Job, JobStoreError>;
     async fn set_queue_order(
         &self,
@@ -188,6 +196,17 @@ impl JobStore for InMemoryJobStore {
             let from = job.state;
             apply_transition(job, to, failure)?;
             Ok(JobEventKind::StateChanged { from, to })
+        })
+        .await
+    }
+
+    async fn complete_cancelled_import(&self, id: JobId) -> Result<Job, JobStoreError> {
+        self.mutate(id, |job| {
+            apply_cancelled_import_completion(job)?;
+            Ok(JobEventKind::StateChanged {
+                from: JobState::Cancelled,
+                to: JobState::Completed,
+            })
         })
         .await
     }
