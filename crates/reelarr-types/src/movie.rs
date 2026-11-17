@@ -178,6 +178,11 @@ pub struct LibraryRoot {
     pub kind: LibraryRootKind,
     /// How often the root is rescanned. `None` disables periodic rescans.
     pub rescan_interval_secs: Option<u64>,
+    /// The library folder new movies are imported into when there are
+    /// several. At most one root has this set, and only a `Library` root.
+    /// With a single library root and no default, that root is used.
+    #[serde(default)]
+    pub is_default: bool,
 }
 
 /// Technical details of a media file, read with ffprobe.
@@ -296,6 +301,36 @@ pub struct NewLibraryRoot {
     /// Defaults to [`DEFAULT_RESCAN_INTERVAL_SECS`] when omitted.
     #[serde(default)]
     pub rescan_interval_secs: Option<u64>,
+    /// Make this the default import folder (clearing any other default).
+    /// Only valid for a `Library` root.
+    #[serde(default)]
+    pub is_default: bool,
+}
+
+#[cfg(test)]
+mod library_root_tests {
+    use super::{LibraryRoot, LibraryRootKind, NewLibraryRoot};
+
+    #[test]
+    fn is_default_is_optional_and_false_when_omitted() {
+        let new: NewLibraryRoot =
+            serde_json::from_str(r#"{"path":"/media/movies","kind":"library"}"#).unwrap();
+        assert!(!new.is_default);
+        let new: NewLibraryRoot =
+            serde_json::from_str(r#"{"path":"/media/movies","kind":"library","is_default":true}"#)
+                .unwrap();
+        assert!(new.is_default);
+        let root: LibraryRoot = serde_json::from_str(
+            r#"{"id":1,"path":"/media/movies","kind":"library","rescan_interval_secs":null}"#,
+        )
+        .unwrap();
+        assert!(!root.is_default);
+        assert_eq!(root.kind, LibraryRootKind::Library);
+        assert_eq!(
+            serde_json::to_value(&root).unwrap()["is_default"],
+            serde_json::Value::Bool(false)
+        );
+    }
 }
 
 #[cfg(test)]

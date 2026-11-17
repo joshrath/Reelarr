@@ -412,6 +412,7 @@ mod tests {
                 path: format!("/media/movies-{id}"),
                 kind,
                 rescan_interval_secs: None,
+                is_default: false,
             },
             health,
             health_checked_at: None,
