@@ -385,3 +385,50 @@ async fn back_room_renders_the_lab_while_checking() {
     assert!(body.contains(r#"<a href="/back-room" aria-current="page""#));
     assert!(body.contains("No tape in the deck"));
 }
+
+#[tokio::test]
+async fn employees_only_renders_the_console_while_checking() {
+    let (status, content_type, body) = get("/employees-only").await;
+    assert_eq!(status, 200);
+    assert!(content_type.starts_with("text/html"));
+    assert!(body.contains(r#"<h1 id="page-title">Employees Only</h1>"#));
+    // The session is checked in the browser: the server sends both managed
+    // sections with a loading status, and no forms or values yet.
+    assert!(body.contains(r#"aria-labelledby="roots-title""#));
+    assert!(body.contains("Library folders"));
+    assert!(body.contains(r#"aria-labelledby="nntp-title""#));
+    assert!(body.contains("Usenet server"));
+    assert!(body.contains("Checking your staff badge"));
+    assert!(!body.contains(r#"type="password""#));
+    assert!(!body.contains(r#"id="root-path""#));
+    // Parts with no API are listed honestly, with no sample values.
+    assert!(body.contains(r#"aria-labelledby="later-title""#));
+    assert!(body.contains("Not connected yet"));
+    for part in [
+        "Storage usage",
+        "Movie metadata",
+        "Indexers",
+        "Staff accounts",
+        "Quality &amp; formats",
+    ] {
+        assert!(body.contains(part), "{part}");
+    }
+    for made_up in [
+        "REELARR-SRV-CORE",
+        "UPTIME",
+        "114D",
+        "CLEARANCE LVL",
+        "148.6 TB",
+        "240.0 TB",
+        "COMMIT SYSTEM CONFIG",
+        "Radarr",
+        "Sonarr",
+        "Prowlarr",
+        "TB USED",
+    ] {
+        assert!(!body.contains(made_up), "{made_up}");
+    }
+    // Employees Only is its own section, and the deck stays empty.
+    assert!(body.contains(r#"<a href="/employees-only" aria-current="page""#));
+    assert!(body.contains("No tape in the deck"));
+}
