@@ -73,6 +73,7 @@ async fn a_leftover_download_imports_into_the_library_through_app_state() {
             path: library.to_string_lossy().into_owned(),
             kind: LibraryRootKind::Library,
             rescan_interval_secs: None,
+            is_default: false,
         })
         .await
         .unwrap();

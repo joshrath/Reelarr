@@ -523,3 +523,66 @@ async fn discard_of_a_cancelled_job_with_no_import_running_is_immediate() {
     assert!(!exists(&e.staging.join(id.to_string())));
     e.supervisor.shutdown().await;
 }
+
+fn no_default_root() -> ImportResult {
+    ImportResult::Failed {
+        reason: "several library folders and none is set as the import default".into(),
+        retryable: true,
+        code: Some(FailureCode::NoDefaultRoot),
+    }
+}
+
+#[tokio::test]
+async fn a_library_folder_change_ends_import_waits_at_once() {
+    let hour = Duration::from_secs(3600);
+    let offline = || ImportResult::Failed {
+        reason: "library folder is unavailable".into(),
+        retryable: true,
+        code: Some(FailureCode::RootOffline),
+    };
+    // A job waiting for a default folder (or on any other retry wait) is
+    // tried again at once when the folders change, not after its hour.
+    for first in [no_default_root(), offline()] {
+        let e = env(config(vec![hour])).await;
+        let (id, _) = e.leftover(Some(MovieId(1))).await;
+        let script = e.script(vec![first, imported()], None);
+        e.supervisor.start().await.unwrap();
+        wait("first attempt", || {
+            let n = script.seen().len();
+            let idle = e.supervisor.importing().is_empty();
+            async move { n == 1 && idle }
+        })
+        .await;
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        assert_eq!(script.seen().len(), 1, "waits on the retry clock");
+        assert_eq!(
+            e.jobs.get(id).await.unwrap().state,
+            JobState::ReadyForImport
+        );
+        e.supervisor.library_roots_changed();
+        e.wait_state(id, JobState::Completed).await;
+        assert_eq!(script.seen().len(), 2);
+        e.supervisor.shutdown().await;
+    }
+}
+
+#[tokio::test]
+async fn a_folder_change_during_an_attempt_retries_it_at_once() {
+    let e = env(config(vec![Duration::from_secs(3600)])).await;
+    let (id, _) = e.leftover(Some(MovieId(1))).await;
+    let gate = Arc::new(Semaphore::new(0));
+    let script = e.script(vec![no_default_root(), imported()], Some(gate.clone()));
+    e.supervisor.start().await.unwrap();
+    wait("attempt running", || {
+        let n = script.seen().len();
+        async move { n == 1 }
+    })
+    .await;
+    // The user picks the default while the attempt that will report
+    // NoDefaultRoot is still running.
+    e.supervisor.library_roots_changed();
+    gate.add_permits(2);
+    e.wait_state(id, JobState::Completed).await;
+    assert_eq!(script.seen().len(), 2);
+    e.supervisor.shutdown().await;
+}

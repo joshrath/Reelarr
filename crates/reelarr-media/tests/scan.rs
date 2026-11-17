@@ -38,6 +38,7 @@ fn root(dir: &Path) -> LibraryRoot {
         path: dir.to_string_lossy().into_owned(),
         kind: LibraryRootKind::Library,
         rescan_interval_secs: Some(3600),
+        is_default: false,
     }
 }
 

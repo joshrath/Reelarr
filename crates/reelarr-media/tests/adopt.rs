@@ -134,6 +134,7 @@ async fn adopts_a_radarr_library_without_touching_files() {
         path: dir.to_string_lossy().into_owned(),
         kind: LibraryRootKind::Library,
         rescan_interval_secs: None,
+        is_default: false,
     };
     let scanner = Scanner::new(
         FakeProber,

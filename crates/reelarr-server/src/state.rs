@@ -120,8 +120,11 @@ impl AppState {
             downloads.worker_config(),
             downloads.scheduler.clone(),
         );
-        // Library root: the movie's existing root, else the only library
-        // root; with several roots and no default the import fails NoDefaultRoot.
+        // Library root: the movie's existing root, else the stored default
+        // import folder (read on every import), else the only library root.
+        // With none or several and no default, the job waits in
+        // ReadyForImport (retryable NoDefaultRoot) until the folders change.
+        // `HandlerOptions::default_root` stays `None`: it is a test override.
         let import = MediaImportHandler::new(
             &db,
             FfprobeProber::default(),

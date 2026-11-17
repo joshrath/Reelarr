@@ -1,12 +1,17 @@
-//! Library folder settings: list, add, re-check and remove library roots.
-//! Removing a root only forgets its rows; files on disk are never touched.
+//! Library folder settings: list, add, re-check and remove library roots,
+//! and pick the default import folder. Removing a root only forgets its rows;
+//! files on disk are never touched, and no folder is ever created.
+//!
+//! Every change that can let a waiting import choose a folder (adding a root,
+//! setting the default, removing a root) tells the download supervisor, so
+//! jobs waiting with `NoDefaultRoot` are imported at once.
 use crate::{auth::AuthUser, state::AppState};
 use axum::{
     Json, Router,
     extract::{Path, Query, State, rejection::JsonRejection},
     http::StatusCode,
     response::{IntoResponse, Response},
-    routing::{delete, get, post},
+    routing::{delete, get, post, put},
 };
 use reelarr_media::db::RootError;
 use reelarr_media::store::StoreError;
@@ -18,6 +23,7 @@ pub fn router() -> Router<AppState> {
         .route("/library/roots", get(list).post(add))
         .route("/library/roots/{id}", delete(remove))
         .route("/library/roots/{id}/check", post(check))
+        .route("/library/roots/{id}/default", put(set_default))
 }
 
 pub struct LibraryError(StatusCode, ApiError);
@@ -58,6 +64,9 @@ impl From<RootError> for LibraryError {
             RootError::Overlaps { .. } => error(StatusCode::CONFLICT, "overlapping_root", message),
             RootError::HasFiles { .. } => error(StatusCode::CONFLICT, "root_has_files", message),
             RootError::NotFound => error(StatusCode::NOT_FOUND, "not_found", message),
+            RootError::DefaultNotLibrary => {
+                error(StatusCode::BAD_REQUEST, "default_not_library", message)
+            }
             RootError::Store(e) => e.into(),
         }
     }
@@ -104,7 +113,19 @@ async fn add(
     let Json(body) =
         body.map_err(|e| error(StatusCode::BAD_REQUEST, "invalid_body", e.body_text()))?;
     let root = state.library_roots.add(body).await?;
+    state.downloads.library_roots_changed();
     Ok((StatusCode::CREATED, Json(refresh(&state, &root).await?)))
+}
+
+/// Makes a library folder the only default import folder. Idempotent.
+async fn set_default(
+    _: AuthUser,
+    State(state): State<AppState>,
+    Path(id): Path<i64>,
+) -> Result<Json<LibraryRootInfo>, LibraryError> {
+    let root = state.library_roots.set_default(LibraryRootId(id)).await?;
+    state.downloads.library_roots_changed();
+    Ok(Json(refresh(&state, &root).await?))
 }
 
 async fn check(
@@ -136,5 +157,6 @@ async fn remove(
         .library_roots
         .remove(LibraryRootId(id), query.forget_files)
         .await?;
+    state.downloads.library_roots_changed();
     Ok(StatusCode::NO_CONTENT)
 }

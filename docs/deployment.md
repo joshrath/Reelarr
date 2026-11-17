@@ -255,9 +255,18 @@ are checked with PAR2; repair itself is not supported yet.
 ### Import
 
 A finished download is imported into the library right away: the movie it was
-grabbed for is placed in that movie's existing library folder, else the only
-library folder (with several folders and no import default the job fails with
-`NoDefaultRoot`). The file is hardlinked when the library shares a filesystem
+grabbed for is placed in that movie's existing library folder, else the
+default import folder, else the only library folder. A single library folder
+is used without being marked as the default. With no library folder, or with
+several and no default (for example sibling `movies`, `tvshows` and `music`
+folders on one drive), the job waits in `ReadyForImport` with
+`NoDefaultRoot` until a folder is added or the default is picked
+(`PUT /api/v1/library/roots/{id}/default`, or `"is_default": true` when adding
+one); it is then imported at once rather than after its retry wait. Only a
+library folder (not a manual-import folder) can be the default, at most one
+is, and removing it leaves no default. Reelarr picks no default by folder
+name, and adding a library folder never creates the directory: register a
+folder that already exists or will be mounted there. The file is hardlinked when the library shares a filesystem
 with `$REELARR_DOWNLOADS_DIR`, otherwise copied; the library mount must be
 writable for this (see the `rw` notes above). Imports run one at a time beside
 downloads and do not need a Usenet provider. Downloads that were already

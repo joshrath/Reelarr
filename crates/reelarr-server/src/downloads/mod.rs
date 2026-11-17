@@ -62,6 +62,11 @@
 //! - Retryable failure: the job goes back to `ReadyForImport` and waits
 //!   `import_retry` (1, 5, 15 minutes, then every 30 minutes) before the next
 //!   attempt. The wait is kept in memory; a restart tries again at once.
+//!   When the library folders change (a folder added or removed, or the
+//!   default import folder set), [`Supervisor::library_roots_changed`] drops
+//!   every import wait and wakes the scheduler, so a job waiting with
+//!   `NoDefaultRoot` is imported at once; an attempt that was already running
+//!   when they changed and fails retryably is tried again at once too.
 //! - Terminal failure: `Failed` with the handler's code (`Other` if none).
 //! - No match: `Failed` with `NoMatch`.
 //!
@@ -280,6 +285,10 @@ struct State {
     importing: HashSet<JobId>,
     /// Retry wait after a retryable import failure.
     import_held: HashMap<JobId, Hold>,
+    /// Bumped by [`Supervisor::library_roots_changed`].
+    roots_epoch: u64,
+    /// `roots_epoch` when each running import started.
+    import_epoch: HashMap<JobId, u64>,
     /// Cancelled jobs whose staging files go once their run or import returns.
     discard: HashSet<JobId>,
     stopping: bool,
@@ -403,6 +412,19 @@ impl Supervisor {
     /// Rescan the queue now (after enqueue or a queue-order change).
     pub fn wake(&self) {
         self.inner.wake.notify_one();
+    }
+
+    /// A library folder was added or removed, or the default import folder
+    /// changed. Every import waiting on the retry clock becomes eligible at
+    /// once (a `NoDefaultRoot` wait may now be resolved), and the scheduler is
+    /// woken.
+    pub fn library_roots_changed(&self) {
+        {
+            let mut state = lock(&self.inner.state);
+            state.roots_epoch = state.roots_epoch.wrapping_add(1);
+            state.import_held.clear();
+        }
+        self.wake();
     }
 
     /// Saved or removed NNTP settings: build a new generation for new jobs.
@@ -784,6 +806,8 @@ impl Inner {
                     continue;
                 }
                 state.importing.insert(id);
+                let epoch = state.roots_epoch;
+                state.import_epoch.insert(id, epoch);
             }
             let download = match self.jobs.get(id).await {
                 Ok(job) if importable(&job) => self.completed_download(&job).await,
@@ -916,7 +940,12 @@ impl Inner {
         let deferred = {
             let mut state = lock(&self.state);
             state.importing.remove(&id);
-            if retry {
+            let started = state.import_epoch.remove(&id);
+            // The folders changed while this attempt ran, so its failure
+            // (a NoDefaultRoot, say) may already be stale: no wait, try again
+            // at once (the loop re-runs dispatch after every finished import).
+            let stale = started != Some(state.roots_epoch);
+            if retry && !stale {
                 let failures = state.import_held.get(&id).map_or(0, |h| h.failures) + 1;
                 let delay = self.config.import_retry_delay(failures);
                 state.import_held.insert(
@@ -941,6 +970,7 @@ impl Inner {
         let deferred = {
             let mut state = lock(&self.state);
             state.importing.remove(&id);
+            state.import_epoch.remove(&id);
             !state.active.contains_key(&id) && state.discard.remove(&id)
         };
         if deferred {

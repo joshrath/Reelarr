@@ -16,8 +16,8 @@ use reelarr_media::import::{HandlerOptions, MediaImportHandler, TitleYearMatcher
 use reelarr_media::scan::{MediaFileStore, NewMediaFile, ProbeError, Prober};
 use reelarr_media::store::MovieStore;
 use reelarr_types::{
-    Artwork, ExternalIds, LibraryRoot, LibraryRootKind, MediaFileId, MediaKind, MediaProbe,
-    MediaStream, MovieId, MovieMetadata, NewLibraryRoot, StreamKind,
+    Artwork, ExternalIds, LibraryRoot, LibraryRootId, LibraryRootKind, MediaFileId, MediaKind,
+    MediaProbe, MediaStream, MovieId, MovieMetadata, NewLibraryRoot, StreamKind,
 };
 
 struct FakeProber;
@@ -96,6 +96,7 @@ impl Env {
                 path: path.to_string_lossy().into_owned(),
                 kind: LibraryRootKind::Library,
                 rescan_interval_secs: None,
+                is_default: false,
             })
             .await
             .unwrap()
@@ -382,14 +383,145 @@ async fn several_roots_need_a_default() {
     let b = env.root("b").await;
     env.download(b"main feature bytes");
 
+    // Retryable: the job waits in ReadyForImport until the user picks one.
     let result = env
         .handler(|_| {})
         .import(env.completed(JobId::new()))
         .await;
-    assert_eq!(failed(result), (false, Some(FailureCode::NoDefaultRoot)));
+    assert_eq!(failed(result), (true, Some(FailureCode::NoDefaultRoot)));
+    assert_eq!(env.file_count().await, 0);
 
     let handler = env.handler(|o| o.default_root = Some(b.id));
     let id = imported(handler.import(env.completed(JobId::new())).await);
+    assert_eq!(env.file_path(id).await, dest_in(&b));
+}
+
+#[tokio::test]
+async fn the_stored_default_is_read_on_every_import() {
+    let env = env().await;
+    env.root("a").await;
+    let b = env.root("b").await;
+    env.root("c").await;
+    env.download(b"main feature bytes");
+
+    // One handler for the whole test, built before any default exists, as
+    // the server builds it at startup.
+    let handler = env.handler(|_| {});
+    let result = handler.import(env.completed(JobId::new())).await;
+    assert_eq!(failed(result), (true, Some(FailureCode::NoDefaultRoot)));
+
+    SqliteLibraryRootStore::new(&env.db)
+        .set_default(b.id)
+        .await
+        .unwrap();
+    let id = imported(handler.import(env.completed(JobId::new())).await);
+    assert_eq!(env.file_path(id).await, dest_in(&b));
+}
+
+#[tokio::test]
+async fn one_library_root_is_used_without_a_stored_default() {
+    let env = env().await;
+    let root = env.root("library").await;
+    // A manual-import folder is not a library folder and does not count.
+    let manual = env.tmp.join("manual");
+    std::fs::create_dir_all(&manual).unwrap();
+    SqliteLibraryRootStore::new(&env.db)
+        .add(NewLibraryRoot {
+            path: manual.to_string_lossy().into_owned(),
+            kind: LibraryRootKind::ManualImport,
+            rescan_interval_secs: None,
+            is_default: false,
+        })
+        .await
+        .unwrap();
+    assert!(!root.is_default);
+    env.download(b"main feature bytes");
+
+    let id = imported(
+        env.handler(|_| {})
+            .import(env.completed(JobId::new()))
+            .await,
+    );
+    assert_eq!(env.file_path(id).await, dest_in(&root));
+}
+
+#[tokio::test]
+async fn the_test_override_wins_over_the_stored_default() {
+    let env = env().await;
+    let a = env.root("a").await;
+    let b = env.root("b").await;
+    SqliteLibraryRootStore::new(&env.db)
+        .set_default(a.id)
+        .await
+        .unwrap();
+    env.download(b"main feature bytes");
+
+    let handler = env.handler(|o| o.default_root = Some(b.id));
+    let id = imported(handler.import(env.completed(JobId::new())).await);
+    assert_eq!(env.file_path(id).await, dest_in(&b));
+    assert!(!dest_in(&a).exists());
+}
+
+#[tokio::test]
+async fn a_default_that_is_not_a_library_folder_is_retryable() {
+    let env = env().await;
+    let a = env.root("a").await;
+    env.root("b").await;
+    let manual = env.tmp.join("manual");
+    std::fs::create_dir_all(&manual).unwrap();
+    let manual = SqliteLibraryRootStore::new(&env.db)
+        .add(NewLibraryRoot {
+            path: manual.to_string_lossy().into_owned(),
+            kind: LibraryRootKind::ManualImport,
+            rescan_interval_secs: None,
+            is_default: false,
+        })
+        .await
+        .unwrap();
+    env.download(b"main feature bytes");
+
+    for default in [manual.id, LibraryRootId(9999)] {
+        let result = env
+            .handler(|o| o.default_root = Some(default))
+            .import(env.completed(JobId::new()))
+            .await;
+        assert_eq!(
+            failed(result),
+            (true, Some(FailureCode::NoDefaultRoot)),
+            "{default:?}"
+        );
+    }
+    assert_eq!(env.file_count().await, 0);
+    assert!(!dest_in(&a).exists());
+}
+
+#[tokio::test]
+async fn a_movie_already_in_the_library_needs_no_default() {
+    let env = env().await;
+    env.root("a").await;
+    let b = env.root("b").await;
+    env.root("c").await;
+    let existing = Path::new(&b.path).join("old.mkv");
+    std::fs::write(&existing, b"old copy").unwrap();
+    SqliteMediaFileStore::new(&env.db)
+        .insert(NewMediaFile {
+            movie_id: Some(env.movie),
+            root_id: b.id,
+            path: existing.to_string_lossy().into_owned(),
+            size_bytes: 8,
+            modified_at: 0,
+            probe: None,
+            kind: MediaKind::File,
+        })
+        .await
+        .unwrap();
+    env.download(b"main feature bytes");
+
+    let id = imported(
+        env.handler(|_| {})
+            .import(env.completed(JobId::new()))
+            .await,
+    );
     assert_eq!(env.file_path(id).await, dest_in(&b));
 }
 
@@ -420,12 +552,12 @@ async fn a_movie_stays_on_the_root_it_already_lives_on() {
 }
 
 #[tokio::test]
-async fn no_library_root_is_terminal_and_unknown_title_is_no_match() {
+async fn no_library_root_is_retryable_and_unknown_title_is_no_match() {
     let env = env().await;
     env.download(b"main feature bytes");
     let handler = env.handler(|_| {});
     let result = handler.import(env.completed(JobId::new())).await;
-    assert_eq!(failed(result), (false, Some(FailureCode::NoDefaultRoot)));
+    assert_eq!(failed(result), (true, Some(FailureCode::NoDefaultRoot)));
 
     env.root("library").await;
     let mut download = env.completed(JobId::new());

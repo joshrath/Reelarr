@@ -11,8 +11,8 @@ use reelarr_media::scan::{MediaFileStore, NewMediaFile, ProbeError, Prober, Scan
 use reelarr_media::store::{MovieStore, StoreError};
 use reelarr_stream::{Lookup, MediaLookup};
 use reelarr_types::{
-    Artwork, ExternalIds, LibraryRoot, LibraryRootKind, MediaFileId, MediaFileStatus, MediaKind,
-    MediaProbe, MovieMetadata, NewLibraryRoot, RootHealth,
+    Artwork, ExternalIds, LibraryRoot, LibraryRootId, LibraryRootKind, MediaFileId,
+    MediaFileStatus, MediaKind, MediaProbe, MovieMetadata, NewLibraryRoot, RootHealth,
 };
 
 /// A file-backed database: `:memory:` gives each pooled connection its own
@@ -45,6 +45,7 @@ fn new_root(path: &Path) -> NewLibraryRoot {
         path: path.to_string_lossy().into_owned(),
         kind: LibraryRootKind::Library,
         rescan_interval_secs: None,
+        is_default: false,
     }
 }
 
@@ -155,6 +156,191 @@ async fn roots_reject_relative_duplicate_and_nested_paths() {
         Err(RootError::Overlaps { .. })
     ));
     assert_eq!(store.list().await.unwrap(), vec![root]);
+}
+
+fn manual_root(path: &Path) -> NewLibraryRoot {
+    NewLibraryRoot {
+        kind: LibraryRootKind::ManualImport,
+        ..new_root(path)
+    }
+}
+
+fn defaults(roots: &[LibraryRoot]) -> Vec<i64> {
+    roots
+        .iter()
+        .filter(|r| r.is_default)
+        .map(|r| r.id.0)
+        .collect()
+}
+
+#[tokio::test]
+async fn adding_roots_never_marks_one_default_by_itself() {
+    let db = db().await;
+    let store = SqliteLibraryRootStore::new(&db);
+    let tmp = tempfile::tempdir().unwrap();
+    let first = store
+        .add(new_root(&tmp.path().join("movies")))
+        .await
+        .unwrap();
+    assert!(
+        !first.is_default,
+        "the first root is not silently the default"
+    );
+    store
+        .add(new_root(&tmp.path().join("tvshows")))
+        .await
+        .unwrap();
+    assert!(defaults(&store.list().await.unwrap()).is_empty());
+    assert!(
+        store
+            .list_info()
+            .await
+            .unwrap()
+            .iter()
+            .all(|info| !info.root.is_default)
+    );
+}
+
+#[tokio::test]
+async fn at_most_one_root_is_the_default() {
+    let db = db().await;
+    let store = SqliteLibraryRootStore::new(&db);
+    let tmp = tempfile::tempdir().unwrap();
+    let movies = store
+        .add(new_root(&tmp.path().join("movies")))
+        .await
+        .unwrap();
+    let tv = store
+        .add(new_root(&tmp.path().join("tvshows")))
+        .await
+        .unwrap();
+
+    let set = store.set_default(movies.id).await.unwrap();
+    assert!(set.is_default);
+    assert_eq!(defaults(&store.list().await.unwrap()), vec![movies.id.0]);
+    // Idempotent.
+    store.set_default(movies.id).await.unwrap();
+    assert_eq!(defaults(&store.list().await.unwrap()), vec![movies.id.0]);
+    // Changing it moves the flag.
+    store.set_default(tv.id).await.unwrap();
+    assert_eq!(defaults(&store.list().await.unwrap()), vec![tv.id.0]);
+    assert!(store.get(tv.id).await.unwrap().unwrap().is_default);
+    assert!(!store.get(movies.id).await.unwrap().unwrap().is_default);
+
+    // Adding with is_default takes the flag over in the same step.
+    let music = store
+        .add(NewLibraryRoot {
+            is_default: true,
+            ..new_root(&tmp.path().join("music"))
+        })
+        .await
+        .unwrap();
+    assert!(music.is_default);
+    assert_eq!(defaults(&store.list().await.unwrap()), vec![music.id.0]);
+
+    // The schema refuses a second default even behind the store's back.
+    let second = sqlx::query("UPDATE library_roots SET is_default = 1 WHERE id = ?")
+        .bind(movies.id.0)
+        .execute(db.pool())
+        .await;
+    assert!(second.is_err(), "partial unique index allows one default");
+    assert_eq!(defaults(&store.list().await.unwrap()), vec![music.id.0]);
+}
+
+#[tokio::test]
+async fn set_default_rejects_manual_import_and_unknown_roots() {
+    let db = db().await;
+    let store = SqliteLibraryRootStore::new(&db);
+    let tmp = tempfile::tempdir().unwrap();
+    let movies = store
+        .add(new_root(&tmp.path().join("movies")))
+        .await
+        .unwrap();
+    let manual = store
+        .add(manual_root(&tmp.path().join("manual")))
+        .await
+        .unwrap();
+    store.set_default(movies.id).await.unwrap();
+
+    assert!(matches!(
+        store.set_default(manual.id).await,
+        Err(RootError::DefaultNotLibrary)
+    ));
+    assert!(matches!(
+        store.set_default(LibraryRootId(9999)).await,
+        Err(RootError::NotFound)
+    ));
+    // A rejected change keeps the previous default.
+    assert_eq!(defaults(&store.list().await.unwrap()), vec![movies.id.0]);
+
+    // A manual-import folder cannot be added as the default either.
+    assert!(matches!(
+        store
+            .add(NewLibraryRoot {
+                is_default: true,
+                ..manual_root(&tmp.path().join("manual2"))
+            })
+            .await,
+        Err(RootError::DefaultNotLibrary)
+    ));
+    assert_eq!(store.list().await.unwrap().len(), 2);
+    // The schema refuses it too.
+    let forced = sqlx::query("UPDATE library_roots SET is_default = 1 WHERE id = ?")
+        .bind(manual.id.0)
+        .execute(db.pool())
+        .await;
+    assert!(forced.is_err());
+}
+
+#[tokio::test]
+async fn removing_the_default_root_leaves_no_default() {
+    let db = db().await;
+    let store = SqliteLibraryRootStore::new(&db);
+    let tmp = tempfile::tempdir().unwrap();
+    let movies = store
+        .add(new_root(&tmp.path().join("movies")))
+        .await
+        .unwrap();
+    store
+        .add(new_root(&tmp.path().join("tvshows")))
+        .await
+        .unwrap();
+    store
+        .add(new_root(&tmp.path().join("music")))
+        .await
+        .unwrap();
+    store.set_default(movies.id).await.unwrap();
+
+    store.remove(movies.id, false).await.unwrap();
+    let left = store.list().await.unwrap();
+    assert_eq!(left.len(), 2);
+    assert!(
+        defaults(&left).is_empty(),
+        "no other root inherits the flag"
+    );
+}
+
+#[tokio::test]
+async fn add_accepts_a_missing_folder_but_not_a_file_and_creates_nothing() {
+    let db = db().await;
+    let store = SqliteLibraryRootStore::new(&db);
+    let tmp = tempfile::tempdir().unwrap();
+
+    // Not mounted yet: accepted, and no folder is created for it.
+    let missing = tmp.path().join("nas").join("movies");
+    store.add(new_root(&missing)).await.unwrap();
+    assert!(!missing.exists());
+    assert!(!tmp.path().join("nas").exists());
+
+    let file = tmp.path().join("movies.txt");
+    std::fs::write(&file, b"not a folder").unwrap();
+    match store.add(new_root(&file)).await {
+        Err(RootError::InvalidPath(message)) => {
+            assert!(message.contains("not a folder"), "{message}")
+        }
+        other => panic!("expected InvalidPath, got {other:?}"),
+    }
+    assert_eq!(store.list().await.unwrap().len(), 1);
 }
 
 #[tokio::test]
