@@ -11,9 +11,12 @@ pub mod api;
 pub mod app;
 pub mod components;
 pub mod counter;
+pub mod jobs;
 pub mod library;
 pub mod pages;
 pub mod playback;
+pub mod settings;
+pub mod staff;
 pub mod theme;
 
 #[cfg(feature = "ssr")]
