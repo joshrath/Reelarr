@@ -37,7 +37,9 @@ pub fn WatchPage() -> impl IntoView {
             <Suspense fallback=|| view! { <VcrPlayer state=DeckState::Loading /> }>
                 {move || Suspend::new(async move {
                     let state = deck_state(info.await);
-                    view! { <VcrPlayer state on_retry=retry /> }
+                    let media_id = params
+                        .with_untracked(|p| p.get("id").as_deref().and_then(parse_media_id));
+                    view! { <VcrPlayer state media_id on_retry=retry /> }
                 })}
             </Suspense>
         </section>
