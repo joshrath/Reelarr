@@ -2173,3 +2173,88 @@ a { color: var(--color-primary); }
 @media (forced-colors: active) {
   .vault, .staff-card, .staff-outcome-line { border: 1px solid; }
 }
+
+/* The Record Corner: the themed music aisle, empty until music libraries
+   are supported. */
+.records { display: grid; gap: var(--space-lg); }
+.records-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-end;
+  justify-content: space-between;
+  gap: var(--space-md);
+  padding: var(--space-lg);
+  border-radius: var(--radius-sm);
+  background: var(--color-surface-container-low);
+  box-shadow: 0 20px 25px rgb(0 0 0 / 0.4);
+}
+.records-head-title { display: grid; gap: var(--space-xs); min-width: 0; }
+.records-head-title h1 { margin: 0; text-transform: uppercase; }
+.records-overline {
+  display: flex;
+  align-items: center;
+  gap: var(--space-xs);
+  margin: 0;
+  color: var(--color-primary);
+  font: var(--type-label-sm);
+  letter-spacing: 0.2em;
+}
+.records-subtitle {
+  margin: 0;
+  font: var(--type-headline-md);
+  letter-spacing: var(--tracking-headline-md);
+  text-transform: uppercase;
+  color: var(--color-on-surface);
+}
+.records-slash { color: var(--color-primary); }
+.records-lede { max-width: 42rem; margin: 0; color: var(--color-on-surface-variant); }
+.records-status {
+  padding: var(--space-sm) var(--space-md);
+  border-radius: var(--radius-sm);
+  background: var(--color-surface-container-highest);
+  text-align: right;
+}
+.records-status p { margin: 0; }
+.records-status-label { color: var(--color-outline-text); font: var(--type-label-sm); letter-spacing: var(--tracking-label-sm); }
+.records-status-value {
+  font: var(--type-headline-md);
+  letter-spacing: var(--tracking-headline-md);
+  text-transform: uppercase;
+  color: var(--color-tertiary-container);
+}
+/* An empty record crate: a sunken bin with nothing in it. */
+.records-crate {
+  display: grid;
+  justify-items: center;
+  gap: var(--space-sm);
+  padding: var(--space-xl) var(--space-lg);
+  border: 2px dashed var(--color-outline-variant);
+  border-radius: var(--radius-sm);
+  background: var(--color-surface-container-lowest);
+  box-shadow: inset 0 2px 8px rgb(0 0 0 / 0.8);
+  text-align: center;
+}
+.records-crate-icon > .icon { width: 3rem; height: 3rem; color: var(--color-outline-text); }
+.records-crate-title {
+  margin: 0;
+  font: var(--type-headline-lg);
+  letter-spacing: var(--tracking-headline-lg);
+  text-transform: uppercase;
+  color: var(--color-on-surface);
+}
+.records-crate-message { max-width: 36rem; margin: 0; color: var(--color-on-surface-variant); }
+.records-crate-actions { margin: var(--space-xs) 0 0; }
+.records-note {
+  display: flex;
+  align-items: center;
+  gap: var(--space-xs);
+  margin: 0;
+  color: var(--color-on-surface-variant);
+  font: var(--type-body-sm);
+}
+.records-note > .icon { flex: none; width: 1rem; height: 1rem; }
+@media (max-width: 48rem) {
+  .records-head { padding: var(--space-md); }
+  .records-status { text-align: left; }
+  .records-crate { padding: var(--space-lg) var(--space-md); }
+}

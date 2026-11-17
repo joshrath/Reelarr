@@ -15,6 +15,7 @@ pub mod jobs;
 pub mod library;
 pub mod pages;
 pub mod playback;
+pub mod records;
 pub mod settings;
 pub mod staff;
 pub mod theme;

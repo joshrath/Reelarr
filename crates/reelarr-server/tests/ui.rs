@@ -85,6 +85,7 @@ async fn old_paths_redirect_to_renamed_sections() {
         ("/search", "/counter"),
         ("/queue", "/back-room"),
         ("/settings", "/employees-only"),
+        ("/record-corner", "/records"),
     ] {
         let res = test_app()
             .await
@@ -431,4 +432,43 @@ async fn employees_only_renders_the_console_while_checking() {
     // Employees Only is its own section, and the deck stays empty.
     assert!(body.contains(r#"<a href="/employees-only" aria-current="page""#));
     assert!(body.contains("No tape in the deck"));
+}
+
+#[tokio::test]
+async fn record_corner_is_an_honest_empty_crate() {
+    let (status, _, body) = get("/records").await;
+    assert_eq!(status, 200);
+    assert!(body.contains(r#"<h1 id="page-title">The Record Corner</h1>"#));
+    assert!(body.contains("Hi-Fi Audio &amp; Vinyl Vault"));
+    // Records is its own section in the nav.
+    assert!(body.contains(r#"<a href="/records" aria-current="page""#));
+    assert!(!body.contains(r#"<a href="/" aria-current="page""#));
+    // The empty crate says music isn't supported and links to the
+    // library folders.
+    assert!(body.contains("The crates are empty"));
+    assert!(body.contains("Music libraries aren"));
+    assert!(body.contains("once music library support lands"));
+    // The page itself (not just the nav) links to Employees Only.
+    let page = &body[body.find(r#"<main id="main-content""#).unwrap()..];
+    let page = &page[..page.find("</main>").unwrap()];
+    assert!(page.contains(r#"href="/employees-only""#));
+    assert!(page.contains("Library folders in Employees Only"));
+    // No sample records: no covers, catalogue numbers, formats or the
+    // design's deck and EQ controls.
+    assert!(!page.contains("<img"));
+    for made_up in [
+        "RPM",
+        "FLAC",
+        "DSD128",
+        "180g",
+        "ARCHIVE TAPE",
+        "LOAD CASSETTE",
+        "STAFF CURATED",
+        "HARDWARE EQ",
+        "CrO2",
+        "BYPASS",
+        "16kHz",
+    ] {
+        assert!(!page.contains(made_up), "{made_up}");
+    }
 }

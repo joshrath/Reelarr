@@ -21,6 +21,8 @@ pub const REDIRECTS: &[(&str, &str)] = &[
     ("/search", "/counter"),
     ("/queue", "/back-room"),
     ("/settings", "/employees-only"),
+    // The design's own path for the music aisle.
+    ("/record-corner", "/records"),
 ];
 
 /// The full HTML document rendered on the server around [`App`].
