@@ -59,9 +59,18 @@ pub struct SetPackets {
     pub slices: HashMap<FileId, Vec<SliceSum>>,
     /// Recovery slice exponents mapped to their data length.
     pub recovery: BTreeMap<u32, u64>,
-    /// Recovery slice bodies (without the exponent), filled only when
-    /// [`Packets::keep_recovery_data`] is set.
-    pub recovery_data: BTreeMap<u32, Vec<u8>>,
+    /// Where each accepted recovery slice's data starts on disk, so repair can
+    /// read it by offset instead of holding it in memory.
+    pub recovery_at: BTreeMap<u32, RecoveryLoc>,
+}
+
+/// Location of one recovery slice's data (after the 4-byte exponent).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct RecoveryLoc {
+    /// The `source` value passed to [`Packets::scan_source`].
+    pub source: usize,
+    /// Byte offset of the slice data within that stream.
+    pub offset: u64,
 }
 
 /// Packets from any number of PAR2 files, grouped by recovery set.
@@ -69,9 +78,6 @@ pub struct SetPackets {
 pub struct Packets {
     /// Recovery sets by ID.
     pub sets: HashMap<SetId, SetPackets>,
-    /// When true, store recovery slice bodies for repair. Verify leaves this off
-    /// so a directory full of volumes does not balloon memory.
-    pub keep_recovery_data: bool,
     /// Valid packets accepted (including duplicates).
     pub accepted: u64,
     /// Corrupt, truncated or malformed packets skipped.
@@ -105,7 +111,18 @@ impl Packets {
     /// skipped; only cancellation, budgets and I/O errors return `Err`.
     pub fn scan<R: Read + Seek>(
         &mut self,
+        input: R,
+        limits: &Limits,
+        cancel: &AtomicBool,
+    ) -> Result<(), Error> {
+        self.scan_source(input, 0, limits, cancel)
+    }
+
+    /// Like [`Packets::scan`], tagging recovery slice locations with `source`.
+    pub fn scan_source<R: Read + Seek>(
+        &mut self,
         mut input: R,
+        source: usize,
         limits: &Limits,
         cancel: &AtomicBool,
     ) -> Result<(), Error> {
@@ -120,7 +137,11 @@ impl Packets {
             if !read_full(&mut input, &mut header)? {
                 return Ok(());
             }
-            match self.packet(&mut input, &header, limits, cancel)? {
+            let at = RecoveryLoc {
+                source,
+                offset: pos + HEADER + 4,
+            };
+            match self.packet(&mut input, &header, at, limits, cancel)? {
                 Some(length) => pos += length,
                 None => {
                     if header.starts_with(MAGIC) {
@@ -141,6 +162,7 @@ impl Packets {
         &mut self,
         input: &mut R,
         header: &[u8; HEADER as usize],
+        at: RecoveryLoc,
         limits: &Limits,
         cancel: &AtomicBool,
     ) -> Result<Option<u64>, Error> {
@@ -170,10 +192,6 @@ impl Packets {
             }
             hasher.update(&body);
         } else {
-            let collect = self.keep_recovery_data && kind == *RECOVERY;
-            if collect && body_len.saturating_sub(4) > limits.max_repair_bytes {
-                return Err(Error::Limit("repair data"));
-            }
             let mut left = body_len;
             let mut buf = vec![0; CHUNK];
             let mut first = true;
@@ -185,9 +203,6 @@ impl Packets {
                 }
                 if first && kind == *RECOVERY && n >= 4 {
                     exponent = Some(u32_at(&buf, 0));
-                }
-                if collect {
-                    body.extend_from_slice(&buf[..n]);
                 }
                 first = false;
                 hasher.update(&buf[..n]);
@@ -221,20 +236,7 @@ impl Packets {
                     match entry.recovery.entry(e) {
                         BEntry::Vacant(v) => {
                             v.insert(data_len);
-                            if self.keep_recovery_data
-                                && body.len() as u64 == body_len
-                                && body.len() >= 4
-                            {
-                                let stored = entry
-                                    .recovery_data
-                                    .values()
-                                    .map(|b| b.len() as u64)
-                                    .fold(0u64, u64::saturating_add);
-                                if stored.saturating_add(data_len) > limits.max_repair_bytes {
-                                    return Err(Error::Limit("repair data"));
-                                }
-                                entry.recovery_data.insert(e, body[4..].to_vec());
-                            }
+                            entry.recovery_at.insert(e, at);
                         }
                         BEntry::Occupied(o) if *o.get() != data_len => self.conflicts += 1,
                         BEntry::Occupied(_) => {}

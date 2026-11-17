@@ -30,6 +30,25 @@ match report.primary().map(|s| s.outcome) {
 - `Report::primary()` picks the set that matches the most files when a folder
   holds several.
 
+## Repair limits
+
+- Repair streams. Recovery data is read from the `.par2` files by offset, and
+  present slices are read one 64 KiB chunk at a time into one accumulator per
+  missing slice. Peak working memory is `repair_memory_bytes(needed, chunk)`:
+  `(needed + 2) × chunk` plus three `needed × needed` matrices of 16-bit words.
+  It does not grow with slice size, set size, or how many volumes or sets are
+  on disk. `Limits::max_repair_bytes` (default 512 MiB, about 9,000 missing
+  slices) refuses a repair that would exceed it before any work starts.
+- Only the primary set is repaired, and only `needed` recovery rows are used.
+  If that matrix is singular, a few other windows of rows are tried.
+- Every rebuilt file must match its FileDesc MD5 before anything is renamed
+  into place; a file without a description is refused. Repair runs on one
+  thread and is synchronous; callers run it under `spawn_blocking` and stop it
+  with the cancel flag, which is checked between chunks and slices.
+- Cost is roughly `slice_size × (present + needed) × needed` field
+  multiplications plus a full read of the rebuilt files for the MD5 check.
+  Faster multiplication tables and threads are a later optimization.
+
 Fuzzing: `cd fuzz && cargo +nightly fuzz run packets` (seed with
 `tests/fixtures/*/*.par2`). A bounded deterministic mutation test runs in
 `cargo test`.

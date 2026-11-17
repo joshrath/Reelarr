@@ -120,6 +120,7 @@ pub fn invert(field: &Field, matrix: &[Vec<u16>]) -> Option<Vec<Vec<u16>>> {
 }
 
 /// Column vector `matrix * rhs`.
+#[cfg(test)]
 pub fn mul_vec(field: &Field, matrix: &[Vec<u16>], rhs: &[u16]) -> Vec<u16> {
     matrix
         .iter()

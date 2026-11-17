@@ -7,13 +7,16 @@
 use crate::{
     Error, Limits, Progress,
     gf::{self, Field},
-    packet::{self, Packets},
+    packet::{self, Packets, RecoveryLoc},
     verify::{self, FileReport, FileStatus, Outcome, Report, verify_dir},
 };
-use cap_std::{ambient_authority, fs::Dir};
+use cap_std::{
+    ambient_authority,
+    fs::{Dir, OpenOptions},
+};
 use md5::{Digest, Md5};
 use std::{
-    collections::{BTreeMap, HashSet},
+    collections::{BTreeMap, HashSet, btree_map::Entry as BEntry},
     io::{Read, Seek, SeekFrom, Write},
     path::Path,
     sync::atomic::AtomicBool,
@@ -21,6 +24,8 @@ use std::{
 
 const CHUNK: usize = 64 * 1024;
 const TEMP_PREFIX: &str = ".reelarr-repair-";
+/// How many windows of recovery rows to try when a matrix is singular.
+const MATRIX_ATTEMPTS: usize = 8;
 
 /// What [`repair_dir`] did.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -103,16 +108,13 @@ fn repair_from_report(
     }
 
     packet::check(cancel)?;
-    let mut packets = Packets {
-        keep_recovery_data: true,
-        ..Packets::default()
-    };
+    let mut packets = Packets::default();
     let cap = Dir::open_ambient_dir(dir, ambient_authority())?;
     sweep_temps(&cap)?;
-    for name in &report.par2_files {
+    for (source, name) in report.par2_files.iter().enumerate() {
         packet::check(cancel)?;
         let file = cap.open(name)?;
-        packets.scan(file, limits, cancel)?;
+        packets.scan_source(file, source, limits, cancel)?;
     }
     let Some(stored) = packets.sets.get(&set.set_id) else {
         return Ok(RepairReport {
@@ -125,28 +127,32 @@ fn repair_from_report(
             status: RepairStatus::Incomplete,
         });
     }
-    let slice_usize = usize::try_from(slice).map_err(|_| Error::Limit("slice size"))?;
 
     let field = Field::new();
     let constants = gf::slice_constants(&field);
     let mut missing = Vec::new();
+    let mut present = Vec::new();
     let mut const_idx = 0usize;
     for (fi, file) in set.files.iter().enumerate() {
         let n = file.slices;
-        if const_idx.saturating_add(n as usize) > constants.len() {
+        let n_usize = usize::try_from(n).map_err(|_| Error::Limit("slices"))?;
+        if const_idx.saturating_add(n_usize) > constants.len() {
             return Err(Error::Limit("slices"));
         }
-        for s in bad_slices(file) {
-            if s >= n {
-                continue;
+        let bad: HashSet<u64> = bad_slices(file).into_iter().filter(|&s| s < n).collect();
+        for s in 0..n {
+            let constant = constants[const_idx + s as usize];
+            if bad.contains(&s) {
+                missing.push(MissingSlice {
+                    file: fi,
+                    slice: s,
+                    constant,
+                });
+            } else {
+                present.push((fi, s, constant));
             }
-            missing.push(MissingSlice {
-                file: fi,
-                slice: s,
-                constant: constants[const_idx + s as usize],
-            });
         }
-        const_idx += n as usize;
+        const_idx += n_usize;
     }
     let needed = missing.len();
     if needed == 0 {
@@ -155,63 +161,51 @@ fn repair_from_report(
         });
     }
 
-    let recovery: Vec<(u32, &[u8])> = stored
-        .recovery_data
+    // Only the primary set's rows of the right length; data stays on disk.
+    let candidates: Vec<(u32, RecoveryLoc)> = stored
+        .recovery
         .iter()
-        .filter(|(_, data)| data.len() == slice_usize)
-        .map(|(&e, data)| (e, data.as_slice()))
-        .take(needed)
+        .filter(|&(_, &len)| len == slice)
+        .filter_map(|(&e, _)| stored.recovery_at.get(&e).map(|&loc| (e, loc)))
         .collect();
-    if recovery.len() < needed {
+    if candidates.len() < needed {
         return Ok(RepairReport {
             status: RepairStatus::Insufficient {
                 needed: needed as u64,
-                available: stored
-                    .recovery_data
-                    .values()
-                    .filter(|data| data.len() == slice_usize)
-                    .count() as u64,
+                available: candidates.len() as u64,
             },
         });
     }
-    let stored_bytes = recovery.iter().map(|(_, d)| d.len() as u64).sum::<u64>();
-    let reconstruct = (needed as u64).saturating_mul(slice);
-    if stored_bytes.saturating_add(reconstruct) > limits.max_repair_bytes {
-        return Err(Error::Limit("repair data"));
+    let chunk = usize::try_from(slice.min(CHUNK as u64)).map_err(|_| Error::Limit("slice size"))?;
+    if repair_memory_bytes(needed as u64, chunk as u64) > limits.max_repair_bytes {
+        return Err(Error::Limit("repair memory"));
     }
 
-    let mut matrix = vec![vec![0u16; needed]; needed];
-    for (r, &(exp, _)) in recovery.iter().enumerate() {
-        for (c, miss) in missing.iter().enumerate() {
-            matrix[r][c] = field.pow(miss.constant, exp);
+    // Pick `needed` rows whose matrix is invertible, sliding over the
+    // candidates a bounded number of times if a window is singular.
+    let mut chosen = None;
+    for start in 0..=(candidates.len() - needed).min(MATRIX_ATTEMPTS - 1) {
+        packet::check(cancel)?;
+        let rows = &candidates[start..start + needed];
+        let matrix: Vec<Vec<u16>> = rows
+            .iter()
+            .map(|&(exp, _)| missing.iter().map(|m| field.pow(m.constant, exp)).collect())
+            .collect();
+        if let Some(inv) = gf::invert(&field, &matrix) {
+            chosen = Some((rows, inv));
+            break;
         }
     }
-    let Some(inverse) = gf::invert(&field, &matrix) else {
+    let Some((rows, inverse)) = chosen else {
         return Err(Error::Limit("recovery matrix"));
     };
 
-    let mut present = Vec::new();
-    const_idx = 0;
-    for (fi, file) in set.files.iter().enumerate() {
-        let n = file.slices;
-        let bad: HashSet<u64> = bad_slices(file).into_iter().collect();
-        for s in 0..n {
-            if !bad.contains(&s) {
-                present.push((fi, s, constants[const_idx + s as usize]));
-            }
+    let mut sources: BTreeMap<usize, cap_std::fs::File> = BTreeMap::new();
+    for &(_, loc) in rows {
+        if let BEntry::Vacant(v) = sources.entry(loc.source) {
+            v.insert(cap.open(&report.par2_files[loc.source])?);
         }
-        const_idx += n as usize;
     }
-    let present_factors: Vec<Vec<u16>> = recovery
-        .iter()
-        .map(|&(exp, _)| {
-            present
-                .iter()
-                .map(|&(_, _, constant)| field.pow(constant, exp))
-                .collect()
-        })
-        .collect();
-
     let mut open_files: BTreeMap<usize, cap_std::fs::File> = BTreeMap::new();
     for (fi, file) in set.files.iter().enumerate() {
         if let Some(name) = &file.found_as
@@ -221,104 +215,169 @@ fn repair_from_report(
         }
     }
 
-    let mut rebuilt = vec![vec![0u8; slice_usize]; needed];
-    let work = (present.len() + needed) as u64 * slice;
-    progress(Progress {
-        bytes_done: 0,
-        bytes_total: work,
-    });
-    for chunk_off in (0..slice_usize).step_by(CHUNK) {
-        packet::check(cancel)?;
-        let chunk_len = (slice_usize - chunk_off).min(CHUNK);
-        let mut present_data = Vec::with_capacity(present.len());
-        for &(fi, slice_i, _) in &present {
-            let mut buf = vec![0u8; chunk_len];
-            if let Some(file) = open_files.get_mut(&fi) {
-                read_range(
-                    file,
-                    slice_i,
-                    slice,
-                    set.files[fi].length,
-                    chunk_off,
-                    &mut buf,
-                )?;
-            }
-            present_data.push(buf);
-        }
-        for off in (0..chunk_len).step_by(2) {
-            let mut rhs = vec![0u16; needed];
-            for (r, &(_, rec)) in recovery.iter().enumerate() {
-                let mut acc = u16::from_le_bytes([rec[chunk_off + off], rec[chunk_off + off + 1]]);
-                for (i, data) in present_data.iter().enumerate() {
-                    let word = u16::from_le_bytes([data[off], data[off + 1]]);
-                    acc ^= field.mul(word, present_factors[r][i]);
-                }
-                rhs[r] = acc;
-            }
-            let solved = gf::mul_vec(&field, &inverse, &rhs);
-            for (c, word) in solved.iter().enumerate() {
-                let bytes = word.to_le_bytes();
-                rebuilt[c][chunk_off + off] = bytes[0];
-                rebuilt[c][chunk_off + off + 1] = bytes[1];
-            }
-        }
-        progress(Progress {
-            bytes_done: (chunk_off as u64 + chunk_len as u64)
-                .saturating_mul((present.len() + needed) as u64),
-            bytes_total: work,
-        });
-    }
-
     let files_to_write: Vec<usize> = {
         let mut v: Vec<usize> = missing.iter().map(|m| m.file).collect();
         v.sort_unstable();
         v.dedup();
         v
     };
-    let mut temps = Vec::new();
+    let mut temps: Vec<String> = Vec::new();
     let result = (|| -> Result<Vec<String>, Error> {
-        let mut written = Vec::new();
-        for fi in files_to_write {
+        // Every file we rewrite needs a checksum to prove the result.
+        let mut plan = Vec::new();
+        for &fi in &files_to_write {
+            let file = &set.files[fi];
+            let desc = stored
+                .files
+                .get(&file.file_id)
+                .ok_or(Error::Limit("file checksum"))?;
+            let Some(target) = output_name(file, Some(desc), &report.par2_files) else {
+                return Err(Error::Limit("repair target name"));
+            };
+            plan.push((fi, target, desc.md5));
+        }
+
+        // Seed each temp file with the slices that are still good.
+        let mut outputs: BTreeMap<usize, cap_std::fs::File> = BTreeMap::new();
+        let mut buf = vec![0u8; chunk];
+        for &(fi, _, _) in &plan {
             packet::check(cancel)?;
             let file = &set.files[fi];
-            let Some(target) =
-                output_name(file, stored.files.get(&file.file_id), &report.par2_files)
-            else {
-                continue;
-            };
-            let expected_md5 = stored.files.get(&file.file_id).map(|d| d.md5);
             let tmp = format!("{TEMP_PREFIX}{fi}");
-            {
-                let mut out = cap.create(&tmp)?;
-                temps.push(tmp.clone());
-                let mut hasher = Md5::new();
-                let mut copied = 0u64;
+            let mut out = cap.open_with(
+                &tmp,
+                OpenOptions::new()
+                    .read(true)
+                    .write(true)
+                    .create(true)
+                    .truncate(true),
+            )?;
+            temps.push(tmp);
+            out.set_len(file.length)?;
+            if let Some(src) = open_files.get_mut(&fi) {
                 for s in 0..file.slices {
-                    packet::check(cancel)?;
-                    let mut buf = vec![0u8; slice_usize];
-                    if let Some(idx) = missing.iter().position(|m| m.file == fi && m.slice == s) {
-                        buf.copy_from_slice(&rebuilt[idx]);
-                    } else if let Some(src) = open_files.get_mut(&fi) {
-                        read_range(src, s, slice, file.length, 0, &mut buf)?;
+                    if missing.iter().any(|m| m.file == fi && m.slice == s) {
+                        continue;
                     }
-                    let remain = file.length.saturating_sub(copied);
-                    let take = remain.min(slice) as usize;
-                    out.write_all(&buf[..take])?;
-                    hasher.update(&buf[..take]);
-                    copied += take as u64;
+                    for off in (0..slice).step_by(chunk) {
+                        packet::check(cancel)?;
+                        let n = (slice - off).min(chunk as u64) as usize;
+                        let take = read_range(src, s, slice, file.length, off, &mut buf[..n])?;
+                        if take == 0 {
+                            break;
+                        }
+                        out.seek(SeekFrom::Start(s * slice + off))?;
+                        out.write_all(&buf[..take])?;
+                    }
                 }
-                if copied != file.length {
-                    return Err(Error::Limit("repaired file length"));
-                }
-                if let Some(expected) = expected_md5
-                    && <[u8; 16]>::from(hasher.finalize()) != expected
-                {
-                    return Err(Error::Limit("repaired file checksum"));
-                }
-                out.sync_all()?;
             }
+            outputs.insert(fi, out);
+        }
+
+        // Stream: one accumulator chunk per missing slice, one read buffer,
+        // one output buffer. Present slices are read one at a time.
+        let words = chunk / 2;
+        let mut acc = vec![vec![0u16; words]; needed];
+        let mut factors = vec![0u16; needed];
+        let mut solved = vec![0u8; chunk];
+        let work = (present.len() + needed) as u64 * slice;
+        let mut done = 0u64;
+        progress(Progress {
+            bytes_done: 0,
+            bytes_total: work,
+        });
+        for chunk_off in (0..slice).step_by(chunk) {
+            packet::check(cancel)?;
+            let n = (slice - chunk_off).min(chunk as u64) as usize;
+            let w = n / 2;
+            for (r, &(_, loc)) in rows.iter().enumerate() {
+                let src = sources.get_mut(&loc.source).expect("opened above");
+                src.seek(SeekFrom::Start(loc.offset + chunk_off))?;
+                src.read_exact(&mut buf[..n])?;
+                for (a, b) in acc[r][..w].iter_mut().zip(buf[..n].as_chunks::<2>().0) {
+                    *a = u16::from_le_bytes(*b);
+                }
+            }
+            for &(fi, s, constant) in &present {
+                packet::check(cancel)?;
+                buf[..n].fill(0);
+                if let Some(file) = open_files.get_mut(&fi) {
+                    read_range(
+                        file,
+                        s,
+                        slice,
+                        set.files[fi].length,
+                        chunk_off,
+                        &mut buf[..n],
+                    )?;
+                }
+                for (f, &(exp, _)) in factors.iter_mut().zip(rows) {
+                    *f = field.pow(constant, exp);
+                }
+                for (row, &f) in acc.iter_mut().zip(&factors) {
+                    if f == 0 {
+                        continue;
+                    }
+                    for (a, b) in row[..w].iter_mut().zip(buf[..n].as_chunks::<2>().0) {
+                        let word = u16::from_le_bytes(*b);
+                        if word != 0 {
+                            *a ^= field.mul(word, f);
+                        }
+                    }
+                }
+                done = done.saturating_add(n as u64);
+            }
+            for (c, miss) in missing.iter().enumerate() {
+                packet::check(cancel)?;
+                let coeffs = &inverse[c];
+                for (k, out) in solved[..n].as_chunks_mut::<2>().0.iter_mut().enumerate() {
+                    let mut x = 0u16;
+                    for (row, &m) in acc.iter().zip(coeffs) {
+                        x ^= field.mul(m, row[k]);
+                    }
+                    *out = x.to_le_bytes();
+                }
+                let len = set.files[miss.file].length;
+                let start = miss.slice * slice + chunk_off;
+                if start < len {
+                    let take = (len - start).min(n as u64) as usize;
+                    let out = outputs.get_mut(&miss.file).expect("created above");
+                    out.seek(SeekFrom::Start(start))?;
+                    out.write_all(&solved[..take])?;
+                }
+                done = done.saturating_add(n as u64);
+            }
+            progress(Progress {
+                bytes_done: done,
+                bytes_total: work,
+            });
+        }
+
+        // Prove every temp before renaming any of them into place.
+        for &(fi, _, expected) in &plan {
+            packet::check(cancel)?;
+            let out = outputs.get_mut(&fi).expect("created above");
+            out.sync_all()?;
+            out.seek(SeekFrom::Start(0))?;
+            let mut hasher = Md5::new();
+            loop {
+                let got = out.read(&mut buf)?;
+                if got == 0 {
+                    break;
+                }
+                hasher.update(&buf[..got]);
+            }
+            if <[u8; 16]>::from(hasher.finalize()) != expected {
+                return Err(Error::Limit("repaired file checksum"));
+            }
+        }
+        drop(outputs);
+        let mut written = Vec::new();
+        for (fi, target, _) in plan {
+            packet::check(cancel)?;
+            let tmp = format!("{TEMP_PREFIX}{fi}");
             cap.rename(&tmp, &cap, &target)?;
-            temps.pop();
+            temps.retain(|t| t != &tmp);
             written.push(target);
         }
         Ok(written)
@@ -329,6 +388,17 @@ fn repair_from_report(
     result.map(|files| RepairReport {
         status: RepairStatus::Repaired { files },
     })
+}
+
+/// Peak working memory [`repair_dir`] budgets for `needed` missing slices
+/// processed `chunk` bytes at a time: `needed` accumulators plus two I/O
+/// buffers, and three `needed`×`needed` matrices of 16-bit words (the
+/// system, its inverse, and the copy made while inverting). Compared
+/// against [`Limits::max_repair_bytes`].
+pub fn repair_memory_bytes(needed: u64, chunk: u64) -> u64 {
+    let buffers = needed.saturating_add(2).saturating_mul(chunk);
+    let matrices = needed.saturating_mul(needed).saturating_mul(2 * 3);
+    buffers.saturating_add(matrices)
 }
 
 fn bad_slices(file: &FileReport) -> Vec<u64> {
@@ -377,20 +447,18 @@ fn read_range(
     slice: u64,
     slice_size: u64,
     file_len: u64,
-    offset: usize,
+    offset: u64,
     buf: &mut [u8],
-) -> Result<(), Error> {
+) -> Result<usize, Error> {
     buf.fill(0);
-    let start = slice
-        .saturating_mul(slice_size)
-        .saturating_add(offset as u64);
+    let start = slice.saturating_mul(slice_size).saturating_add(offset);
     if start >= file_len {
-        return Ok(());
+        return Ok(0);
     }
     let avail = (file_len - start).min(buf.len() as u64) as usize;
     file.seek(SeekFrom::Start(start))?;
     file.read_exact(&mut buf[..avail])?;
-    Ok(())
+    Ok(avail)
 }
 
 /// Encode one recovery slice from input slices, using the specification's

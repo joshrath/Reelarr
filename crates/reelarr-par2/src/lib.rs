@@ -19,8 +19,8 @@ mod packet;
 mod repair;
 mod verify;
 
-pub use packet::{FileDesc, Main, Packets, SetPackets, SliceSum};
-pub use repair::{RepairReport, RepairStatus, repair_dir};
+pub use packet::{FileDesc, Main, Packets, RecoveryLoc, SetPackets, SliceSum};
+pub use repair::{RepairReport, RepairStatus, repair_dir, repair_memory_bytes};
 pub use verify::{FileReport, FileStatus, Outcome, Progress, Report, SetReport, verify_dir};
 
 /// A recovery set ID (MD5 of the main packet body).
@@ -53,8 +53,11 @@ pub struct Limits {
     /// resync searches. The rest of that file is skipped; packets already
     /// accepted are kept. Caps work on a multi-gigabyte junk `.par2`.
     pub max_scan_bytes: u64,
-    /// Total recovery-slice bytes plus reconstructed slice bytes kept in memory
-    /// during repair.
+    /// Peak working memory for one repair: one accumulator chunk per missing
+    /// slice, two I/O chunk buffers, and the recovery matrix plus its inverse
+    /// and the copy made while inverting. Recovery data is read from disk by
+    /// offset and never held whole, so this does not grow with slice size or
+    /// with how many sets or volumes are on disk.
     pub max_repair_bytes: u64,
 }
 impl Default for Limits {
@@ -69,7 +72,7 @@ impl Default for Limits {
             max_slice_bytes: 256 << 20,
             max_dir_entries: 100_000,
             max_scan_bytes: 8 << 30,
-            max_repair_bytes: 2 << 30,
+            max_repair_bytes: 512 << 20,
         }
     }
 }

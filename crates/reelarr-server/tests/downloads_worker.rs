@@ -1,9 +1,9 @@
 //! The supervisor over the real NZB worker (`NzbRunnerFactory`) with an
-//! in-memory article source per NNTP settings generation: PAR2 verification
-//! is wired, recovery paths land on the job row, and idle drain keeps a
+//! in-memory article source per NNTP settings generation: PAR2 repair is
+//! wired, recovery paths land on the job row, and idle drain keeps a
 //! running download on its original source.
 use std::{
-    collections::{HashMap, HashSet},
+    collections::{BTreeMap, HashMap, HashSet},
     fs,
     path::{Path, PathBuf},
     sync::{Arc, Mutex},
@@ -356,9 +356,31 @@ fn connections_are_split_between_concurrent_jobs() {
     assert_eq!(articles_per_job(10, 0, 8), 8);
 }
 
+/// Records every file in the output folder at import time, before cleanup.
+#[derive(Default)]
+struct Snapshot(Mutex<BTreeMap<String, Vec<u8>>>);
+#[async_trait]
+impl ImportHandler for Snapshot {
+    async fn import(&self, download: CompletedDownload) -> ImportResult {
+        let mut files = self.0.lock().unwrap();
+        for entry in fs::read_dir(&download.output_path).unwrap() {
+            let entry = entry.unwrap();
+            files.insert(
+                entry.file_name().to_string_lossy().into_owned(),
+                fs::read(entry.path()).unwrap(),
+            );
+        }
+        ImportResult::Imported {
+            media_file_id: MediaFileId(1),
+        }
+    }
+}
+
 #[tokio::test]
-async fn a_damaged_release_is_checked_with_par2() {
+async fn a_damaged_release_is_repaired_with_par2() {
     let e = env(1).await;
+    let snapshot = Arc::new(Snapshot::default());
+    e.supervisor.set_import_handler(snapshot.clone());
     let posts = [
         ("movie.mkv", par2_fixture("movie.mkv")),
         ("notes.nfo", par2_fixture("notes.nfo")),
@@ -371,16 +393,49 @@ async fn a_damaged_release_is_checked_with_par2() {
     e.add(articles);
     e.configure("news.test").await;
     e.supervisor.start().await.unwrap();
+    let job = e.enqueue(&nzb, Some(MovieId(1))).await;
+    e.wait_state(job, JobState::Completed).await;
+    let files = snapshot.0.lock().unwrap().clone();
+    assert!(
+        files.get("movie.mkv") == Some(&par2_fixture("movie.mkv")),
+        "movie.mkv was not repaired byte-exact"
+    );
+    assert!(files.get("notes.nfo") == Some(&par2_fixture("notes.nfo")));
+    assert!(
+        files.keys().all(|name| !name.ends_with(".par2")),
+        "{:?}",
+        files.keys().collect::<Vec<_>>()
+    );
+    e.supervisor.shutdown().await;
+}
+
+#[tokio::test]
+async fn a_release_without_enough_recovery_blocks_fails_repair() {
+    let e = env(1).await;
+    let posts = [
+        ("movie.mkv", par2_fixture("movie.mkv")),
+        ("notes.nfo", par2_fixture("notes.nfo")),
+        ("basic.par2", par2_fixture("basic.par2")),
+        ("basic.vol00+04.par2", par2_fixture("basic.vol00+04.par2")),
+    ];
+    let (nzb, ids, mut articles) = release("par2", &posts);
+    // Articles 1..=25 cover bytes 0..25000: PAR2 slices 0..=6 of movie.mkv,
+    // seven blocks against the four the release posts.
+    for id in &ids[0][..25] {
+        articles.remove(id);
+    }
+    e.add(articles);
+    e.configure("news.test").await;
+    e.supervisor.start().await.unwrap();
     let job = e.enqueue(&nzb, None).await;
     e.wait_state(job, JobState::Failed).await;
     let failure = e.jobs.get(job).await.unwrap().failure.unwrap();
     assert_eq!(failure.code, FailureCode::RepairFailed);
     assert!(failure.message.starts_with(REPAIR_UNAVAILABLE));
-    // Only Par2Verify measures the damage; NoParity says repair is unsupported.
     assert!(
         failure
             .message
-            .contains("needs 1 recovery block and the release has 4"),
+            .contains("needs 7 recovery blocks but the release only has 4"),
         "{}",
         failure.message
     );
