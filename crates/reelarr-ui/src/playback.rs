@@ -44,6 +44,9 @@ pub enum Notice {
     Disc(String),
     /// The browser can't play this file yet. Holds the server's reasons.
     Unsupported(Vec<String>),
+    /// The `<video>` stopped with this `MediaError` code while the playback
+    /// answer is still fine, so the session isn't the cause.
+    Stopped(u16),
 }
 
 pub const OFFLINE_MESSAGE: &str =
@@ -54,10 +57,6 @@ pub const SIGN_IN_MESSAGE: &str = "Your session has ended. Sign in again to play
 pub const NOT_FOUND_MESSAGE: &str = "There's no tape with that number on the shelves.";
 pub const UNSUPPORTED_MESSAGE: &str =
     "Your browser can't play this file as it is, and converting it isn't available yet.";
-/// Added to every playback error: a session that expires mid-film makes the
-/// stream's range requests fail with 401, which the browser only reports as
-/// a generic media error.
-pub const SIGN_IN_AGAIN_HINT: &str = "If you've been away a while, try signing in again.";
 
 impl Notice {
     /// Short heading for the screen.
@@ -69,6 +68,7 @@ impl Notice {
             Notice::TryAgain => "Couldn't load the tape",
             Notice::Disc(_) => "Can't play this tape",
             Notice::Unsupported(_) => "Can't play this tape",
+            Notice::Stopped(_) => "Playback stopped",
         }
     }
 
@@ -81,6 +81,7 @@ impl Notice {
             Notice::TryAgain => TRY_AGAIN_MESSAGE.into(),
             Notice::Disc(message) => message.clone(),
             Notice::Unsupported(_) => UNSUPPORTED_MESSAGE.into(),
+            Notice::Stopped(code) => media_error_message(*code),
         }
     }
 
@@ -136,16 +137,30 @@ pub fn notice_for_failure(failure: &ApiFailure) -> Notice {
     }
 }
 
-/// Copy for a `<video>` `MediaError` code, followed by [`SIGN_IN_AGAIN_HINT`].
+/// What the deck shows after the `<video>` reports a `MediaError`, once the
+/// playback answer has been fetched again.
+///
+/// The browser reports a stream that fails with 401 (a session that expired
+/// mid-film) as a generic media error, so the re-fetch tells the cases
+/// apart: only a 401 asks to sign in, other failures get the usual notices,
+/// and a playback answer that is still fine means the tape itself stopped.
+pub fn notice_after_media_error(code: u16, recheck: Result<PlaybackInfo, ApiFailure>) -> Notice {
+    match deck_state(recheck) {
+        DeckState::Notice(notice) => notice,
+        DeckState::Loading | DeckState::Ready { .. } => Notice::Stopped(code),
+    }
+}
+
+/// Copy for a `<video>` `MediaError` code.
 pub fn media_error_message(code: u16) -> String {
-    let what = match code {
+    match code {
         1 => "Playback was stopped before the tape finished loading.",
-        2 => "The connection dropped while loading the tape.",
+        2 => "The connection dropped while loading the tape. Try again in a moment.",
         3 => "Your browser couldn't decode this tape.",
         4 => "The tape couldn't be loaded, or your browser can't play this file.",
-        _ => "The tape stopped unexpectedly.",
-    };
-    format!("{what} {SIGN_IN_AGAIN_HINT}")
+        _ => "The tape stopped unexpectedly. Try again in a moment.",
+    }
+    .into()
 }
 
 /// A tape counter reading, `HH:MM:SS`. Unknown or negative times read
@@ -307,10 +322,77 @@ mod tests {
     }
 
     #[test]
-    fn media_errors_hint_at_signing_in_again() {
+    fn media_errors_dont_ask_to_sign_in() {
         for code in 0..=5 {
-            assert!(media_error_message(code).ends_with(SIGN_IN_AGAIN_HINT));
+            let message = media_error_message(code);
+            assert!(!message.is_empty());
+            assert!(!message.to_lowercase().contains("sign in"), "{message}");
         }
+    }
+
+    #[test]
+    fn media_error_asks_to_sign_in_only_when_the_recheck_is_401() {
+        assert_eq!(
+            notice_after_media_error(2, Err(status(401, "unauthorized"))),
+            Notice::SignIn
+        );
+        assert_eq!(
+            notice_after_media_error(
+                2,
+                Err(ApiFailure::Status {
+                    status: 401,
+                    code: None
+                })
+            ),
+            Notice::SignIn
+        );
+    }
+
+    #[test]
+    fn media_error_maps_other_recheck_failures_through_the_usual_notices() {
+        assert_eq!(
+            notice_after_media_error(2, Err(status(503, "unavailable"))),
+            Notice::Offline
+        );
+        assert_eq!(
+            notice_after_media_error(2, Err(status(404, "not_found"))),
+            Notice::NotFound
+        );
+        assert_eq!(
+            notice_after_media_error(2, Err(status(500, "lookup_failed"))),
+            Notice::TryAgain
+        );
+        assert_eq!(
+            notice_after_media_error(2, Err(ApiFailure::Network)),
+            Notice::TryAgain
+        );
+    }
+
+    #[test]
+    fn media_error_with_a_fine_recheck_says_the_tape_stopped() {
+        let notice = notice_after_media_error(3, Ok(info(PlaybackMethod::DirectPlay, Vec::new())));
+        assert_eq!(notice, Notice::Stopped(3));
+        assert_eq!(notice.title(), "Playback stopped");
+        assert_eq!(notice.message(), media_error_message(3));
+    }
+
+    #[test]
+    fn media_error_with_an_unsupported_recheck_shows_the_reasons() {
+        let notice = notice_after_media_error(
+            4,
+            Ok(info(
+                PlaybackMethod::Unsupported,
+                vec![UnsupportedReason {
+                    kind: UnsupportedKind::AudioCodec,
+                    name: Some("dts".into()),
+                    message: "DTS audio isn't supported by this browser".into(),
+                }],
+            )),
+        );
+        assert_eq!(
+            notice,
+            Notice::Unsupported(vec!["DTS audio isn't supported by this browser".into()])
+        );
     }
 
     #[test]
