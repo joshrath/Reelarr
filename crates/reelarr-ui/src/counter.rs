@@ -25,6 +25,31 @@ pub const SESSION_PATH: &str = "/api/v1/auth/session";
 /// Where order slips will be tracked.
 pub const BACK_ROOM_PATH: &str = "/back-room";
 
+/// What Ctrl/⌘+K does.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SearchShortcut {
+    /// Already on the counter: focus its field and keep the address,
+    /// `?q=` included.
+    FocusField,
+    /// Anywhere else: go to the counter, which then focuses its field.
+    GoToCounter,
+}
+
+/// Whether `path` (a pathname, without the query) is the counter page.
+pub fn is_counter_path(path: &str) -> bool {
+    let path = path.strip_suffix('/').unwrap_or(path);
+    path == COUNTER_PATH
+}
+
+/// What Ctrl/⌘+K does on the page at `path`.
+pub fn search_shortcut(path: &str) -> SearchShortcut {
+    if is_counter_path(path) {
+        SearchShortcut::FocusField
+    } else {
+        SearchShortcut::GoToCounter
+    }
+}
+
 /// Longest query kept, in characters.
 pub const MAX_QUERY_CHARS: usize = 200;
 
@@ -170,7 +195,7 @@ mod tests {
 
     #[test]
     fn queries_are_trimmed_and_folded() {
-        assert_eq!(normalize_query("  blue \t  velvet\n"), "blue velvet");
+        assert_eq!(normalize_query("  first \t  words\n"), "first words");
         assert_eq!(normalize_query("   "), "");
     }
 
@@ -188,11 +213,11 @@ mod tests {
         assert_eq!(counter_href(""), "/counter");
         assert_eq!(counter_href("  "), "/counter");
         assert_eq!(
-            counter_href("stop making sense"),
-            "/counter?q=stop+making+sense"
+            counter_href("some example words"),
+            "/counter?q=some+example+words"
         );
         assert_eq!(counter_href("a&b=c?#"), "/counter?q=a%26b%3Dc%3F%23");
-        assert_eq!(counter_href("amélie"), "/counter?q=am%C3%A9lie");
+        assert_eq!(counter_href("café"), "/counter?q=caf%C3%A9");
         assert_eq!(counter_href("100%"), "/counter?q=100%25");
     }
 
@@ -241,11 +266,21 @@ mod tests {
     #[test]
     fn results_say_nothing_was_looked_up() {
         assert_eq!(Results::for_query("  "), Results::Idle);
-        let results = Results::for_query(" robocop ");
-        assert_eq!(results, Results::NotSearched("robocop".into()));
-        assert_eq!(results.title(), "“robocop”");
+        let results = Results::for_query(" sample query ");
+        assert_eq!(results, Results::NotSearched("sample query".into()));
+        assert_eq!(results.title(), "“sample query”");
         assert!(results.message().contains("didn't look this up"));
         assert!(Results::Idle.message().contains("isn't hooked up yet"));
+    }
+
+    #[test]
+    fn shortcut_focuses_the_field_when_already_on_the_counter() {
+        assert_eq!(search_shortcut("/counter"), SearchShortcut::FocusField);
+        assert_eq!(search_shortcut("/counter/"), SearchShortcut::FocusField);
+        assert_eq!(search_shortcut("/"), SearchShortcut::GoToCounter);
+        assert_eq!(search_shortcut("/back-room"), SearchShortcut::GoToCounter);
+        assert_eq!(search_shortcut("/counters"), SearchShortcut::GoToCounter);
+        assert_eq!(search_shortcut("/case/3"), SearchShortcut::GoToCounter);
     }
 
     #[test]

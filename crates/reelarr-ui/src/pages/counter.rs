@@ -10,6 +10,7 @@ use leptos_router::hooks::{use_navigate, use_query_map};
 use reelarr_types::SessionInfo;
 
 use crate::api::get_json;
+use crate::components::header::SearchFocus;
 use crate::components::icon::{Icon, IconName};
 use crate::counter::{
     BACK_ROOM_PATH, DeskState, Format, Results, SESSION_PATH, counter_href, desk_state,
@@ -35,14 +36,21 @@ pub fn CounterPage() -> AnyView {
     let format = RwSignal::new(Format::default());
 
     let input = NodeRef::<leptos::html::Input>::new();
-    // Landing on the counter (from the header search or Ctrl/⌘+K) puts the
-    // cursor in the field.
+    // The header search and Ctrl/⌘+K ask for the field through
+    // `SearchFocus`; a direct load doesn't, so it leaves focus alone. On the
+    // counter already, the shortcut asks again and this reruns.
+    let search_focus = SearchFocus::use_context();
     #[cfg(not(feature = "ssr"))]
     Effect::new(move |_| {
-        if let Some(el) = input.get() {
+        let Some(el) = input.get() else {
+            return;
+        };
+        if search_focus.is_some_and(|focus| focus.take()) {
             let _ = el.focus();
         }
     });
+    #[cfg(feature = "ssr")]
+    let _ = search_focus;
 
     let navigate = use_navigate();
     let go = Callback::new(move |query: String| {

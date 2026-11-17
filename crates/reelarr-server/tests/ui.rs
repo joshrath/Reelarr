@@ -340,9 +340,9 @@ async fn counter_renders_the_search_desk() {
 
 #[tokio::test]
 async fn counter_keeps_the_query_without_inventing_results() {
-    let (status, _, body) = get("/counter?q=stop+making+sense").await;
+    let (status, _, body) = get("/counter?q=some+example+words").await;
     assert_eq!(status, 200);
-    assert!(body.contains(r#"value="stop making sense""#));
+    assert!(body.contains(r#"value="some example words""#));
     assert!(!body.contains("1 result"));
     assert!(!body.contains("IN STOCK"));
 }
