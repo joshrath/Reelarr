@@ -25,9 +25,9 @@ use crate::library::FolderHealth;
 use crate::playback::SIGN_IN_PATH;
 use crate::settings::{
     MainFolder, NNTP_PATH, NNTP_SHOWN_CODES, NNTP_TEST_PATH, NntpDraft, NntpField, PICK_MAIN_TITLE,
-    RESCAN_CHOICES, ROOTS_PATH, RootRow, kind_value, new_root, nntp_summary, password_status,
-    pick_main_message, root_check_path, root_default_path, root_error, root_remove_path,
-    test_result,
+    RESCAN_CHOICES, ROOTS_PATH, RootRow, add_library_prompt, kind_value, library_count, new_root,
+    nntp_summary, password_status, pick_main_message, root_check_path, root_default_path,
+    root_error, root_remove_path, test_result,
 };
 use crate::staff::{Gate, LoadProblem, SESSION_PATH, action_error, gate};
 
@@ -141,7 +141,7 @@ fn SectionProblem(problem: LoadProblem, what: &'static str) -> impl IntoView {
 fn RootsFrame(children: Children) -> impl IntoView {
     view! {
         <section class="staff-panel" aria-labelledby="roots-title">
-            <h2 id="roots-title" class="staff-panel-title">
+            <h2 id="roots-title" class="staff-panel-title" tabindex="-1">
                 <Icon name=IconName::HardDrive />
                 "Media storage vaults // Library folders"
             </h2>
@@ -154,7 +154,7 @@ fn RootsFrame(children: Children) -> impl IntoView {
 fn NntpFrame(children: Children) -> impl IntoView {
     view! {
         <section class="staff-panel" aria-labelledby="nntp-title">
-            <h2 id="nntp-title" class="staff-panel-title">
+            <h2 id="nntp-title" class="staff-panel-title" tabindex="-1">
                 <Icon name=IconName::Hub />
                 "Wire room // Usenet server"
             </h2>
@@ -270,6 +270,12 @@ fn RootsSection() -> AnyView {
             _ => MainFolder::NoLibrary,
         })
     });
+    let library_folders = Memo::new(move |_| {
+        roots.with(|r| match r {
+            Some(Ok(list)) => library_count(list),
+            _ => 0,
+        })
+    });
     let ids = Memo::new(move |_| {
         roots.with(|r| match r {
             Some(Ok(list)) => list.iter().map(|i| i.root.id.0).collect::<Vec<_>>(),
@@ -280,7 +286,7 @@ fn RootsSection() -> AnyView {
     view! {
         <RootsFrame>
             <p class="visually-hidden" role="status" aria-live="polite">{move || announce.get()}</p>
-            {move || match roots.with(|r| r.as_ref().map(|r| r.as_ref().map(Vec::is_empty).map_err(|p| *p))) {
+            {move || match roots.with(|r| r.as_ref().map(|r| r.as_ref().map(|l| add_library_prompt(l)).map_err(|p| *p))) {
                 None => view! {
                     <p class="staff-status" role="status">"Reading the library folders…"</p>
                 }
@@ -289,16 +295,16 @@ fn RootsSection() -> AnyView {
                     <SectionProblem problem what="the library folders" />
                 }
                 .into_any(),
-                Some(Ok(true)) => view! {
+                // No library folder (manual-import folders alone don't
+                // count): ask for one.
+                Some(Ok(Some((title, message)))) => view! {
                     <div class="staff-card">
-                        <p class="staff-card-title">"No library folders yet"</p>
-                        <p>
-                            "Add the folder where your movies live by typing its path below, as Reelarr sees it inside its container. Pick a folder that already exists: Reelarr won't create the directory. The Store Floor stocks its shelves from these folders."
-                        </p>
+                        <p class="staff-card-title">{title}</p>
+                        <p>{message}</p>
                     </div>
                 }
                 .into_any(),
-                Some(Ok(false)) => (move || {
+                Some(Ok(None)) => (move || {
                     (main.get() == MainFolder::NeedsPick).then(|| {
                         let message = roots.with(|r| match r {
                             Some(Ok(list)) => pick_main_message(list),
@@ -320,7 +326,7 @@ fn RootsSection() -> AnyView {
             }}
             <ul class="vault-list" class:vault-list-empty=move || ids.with(Vec::is_empty)>
                 <For each=move || ids.get() key=|id| *id let:id>
-                    <RootItem id roots main busy row_error check make_main remove />
+                    <RootItem id roots main library_folders busy row_error check make_main remove />
                 </For>
             </ul>
             <p class="staff-note">
@@ -353,6 +359,7 @@ fn RootItem(
     id: i64,
     roots: RwSignal<Option<Result<Vec<LibraryRootInfo>, LoadProblem>>>,
     main: Memo<MainFolder>,
+    library_folders: Memo<usize>,
     busy: RwSignal<Option<i64>>,
     row_error: RwSignal<Option<(i64, String)>>,
     check: Callback<(i64, String)>,
@@ -458,7 +465,8 @@ fn RootItem(
                                 id=format!("remove-root-{id}")
                                 trigger="Remove…"
                                 trigger_label=format!("Remove {}", current.path)
-                                question=current.remove_question(&main.get())
+                                question=current.remove_question(&main.get(), library_folders.get())
+                                focus_after="roots-title"
                                 confirm="Yes, remove folder"
                                 keep="Keep it"
                                 on_confirm=move |()| remove.run((id, path.clone(), forget))
@@ -988,6 +996,7 @@ fn NntpSection() -> AnyView {
                                 keep="Keep it"
                                 on_confirm=on_remove
                                 busy=Signal::derive(move || busy.get())
+                                focus_after="nntp-title"
                             />
                         </Show>
                     </div>

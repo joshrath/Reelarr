@@ -143,9 +143,12 @@ impl RootRow {
         }
     }
 
-    /// The confirm question for removing this folder. Says so when it's
-    /// the main library folder, and what happens to imports then.
-    pub fn remove_question(&self, main: &MainFolder) -> String {
+    /// The confirm question for removing this folder. When it's the main
+    /// library folder, says what happens to imports afterwards: they wait
+    /// only if no library folder is left, or two or more are left with
+    /// none picked. With one left, that one is used without asking.
+    /// `library_folders` counts the library folders now, this one included.
+    pub fn remove_question(&self, main: &MainFolder, library_folders: usize) -> String {
         let mut question = match self.files {
             0 => format!(
                 "Remove {} from Reelarr? Nothing on disk is touched.",
@@ -161,14 +164,20 @@ impl RootRow {
                 }
             ),
         };
-        match main {
-            MainFolder::Chosen(id) if *id == self.id => question.push_str(
-                " It's the main library folder: new imports wait until you pick another one.",
-            ),
-            MainFolder::Implicit(id) if *id == self.id => question.push_str(
-                " It's your only library folder: new imports wait until you add another one.",
-            ),
-            _ => {}
+        if self.is_library && main.id() == Some(self.id) {
+            let left = library_folders.saturating_sub(1);
+            question.push_str(match (main, left) {
+                (_, 0) => {
+                    " It's your only library folder: new imports wait until you add another one."
+                }
+                (MainFolder::Chosen(_), 1) => {
+                    " It's the main library folder: new imports go into the other library folder instead."
+                }
+                (MainFolder::Chosen(_), _) => {
+                    " It's the main library folder: new imports wait until you pick another one."
+                }
+                _ => "",
+            });
         }
         question
     }
@@ -240,12 +249,37 @@ impl MainFolder {
 pub const PICK_MAIN_TITLE: &str = "Pick a main library folder";
 pub const PICK_MAIN_WAITING: &str = "Waiting for you to pick a main library folder — finished downloads stay ready for import until you do.";
 
-/// The prompt when several library folders exist and none is main.
-pub fn pick_main_message(roots: &[LibraryRootInfo]) -> String {
-    let n = roots
+/// How many library folders there are; manual-import folders don't count.
+pub fn library_count(roots: &[LibraryRootInfo]) -> usize {
+    roots
         .iter()
         .filter(|i| i.root.kind == LibraryRootKind::Library)
-        .count();
+        .count()
+}
+
+/// The card above the folder list asking for a library folder, as
+/// `(title, message)`, or `None` once a library folder exists.
+/// Manual-import folders alone don't give imports anywhere to go.
+pub fn add_library_prompt(roots: &[LibraryRootInfo]) -> Option<(&'static str, &'static str)> {
+    if library_count(roots) > 0 {
+        return None;
+    }
+    Some(if roots.is_empty() {
+        (
+            "No library folders yet",
+            "Add the folder where your movies live by typing its path below, as Reelarr sees it inside its container. Pick a folder that already exists: Reelarr won't create the directory. The Store Floor stocks its shelves from these folders.",
+        )
+    } else {
+        (
+            "No library folder yet",
+            "Only manual-import folders are set up, and imports need a library folder to go into. Add one by typing its path below, as Reelarr sees it inside its container, with “Organized movies (library)” chosen. Pick a folder that already exists: Reelarr won't create the directory.",
+        )
+    })
+}
+
+/// The prompt when several library folders exist and none is main.
+pub fn pick_main_message(roots: &[LibraryRootInfo]) -> String {
+    let n = library_count(roots);
     format!(
         "You have {n} library folders. Which one is the main library folder, the one new imports go into? {PICK_MAIN_WAITING}"
     )
@@ -622,7 +656,7 @@ mod tests {
         assert_eq!(row.files_label(), "2 files on record");
         assert_eq!(row.checked, "Checked 1970-01-01 00:00 UTC");
         assert!(row.forget_files());
-        let q = row.remove_question(&MainFolder::NoLibrary);
+        let q = row.remove_question(&MainFolder::NoLibrary, 0);
         assert!(q.contains("forgets the 2 files"));
         assert!(q.contains("not touched"));
 
@@ -631,7 +665,7 @@ mod tests {
         assert_eq!(empty.health.label(), "Not checked yet");
         assert!(
             !empty
-                .remove_question(&MainFolder::NoLibrary)
+                .remove_question(&MainFolder::NoLibrary, 0)
                 .contains("forgets")
         );
         let mut never = info(1, RootHealth::Online);
@@ -673,7 +707,7 @@ mod tests {
         assert_eq!(main.tag(&rows[1]), None);
         assert!(
             rows[0]
-                .remove_question(&main)
+                .remove_question(&main, 1)
                 .contains("only library folder")
         );
         // Two library folders, no pick: ask, on library rows only.
@@ -701,10 +735,12 @@ mod tests {
         assert!(!main.can_pick(&rows[1]));
         assert_eq!(main.tag(&rows[1]), Some("Main library folder"));
         assert!(rows[1].is_default);
-        let q = rows[1].remove_question(&main);
+        // With one other library folder left, it's used without asking.
+        let q = rows[1].remove_question(&main, 2);
         assert!(q.contains("main library folder"));
-        assert!(q.contains("wait until you pick another"));
-        assert!(!rows[0].remove_question(&main).contains("main library"));
+        assert!(q.contains("go into the other library folder"));
+        assert!(!q.contains("wait"));
+        assert!(!rows[0].remove_question(&main, 2).contains("main library"));
         // A stray default flag on a manual-import folder is ignored.
         let stray = [root(1, ManualImport, true), root(2, Library, false)];
         assert_eq!(MainFolder::of(&stray), MainFolder::Implicit(2));
@@ -723,6 +759,67 @@ mod tests {
         );
         assert_eq!(import_wait(MainFolder::Implicit(1)), None);
         assert_eq!(import_wait(MainFolder::Chosen(1)), None);
+    }
+
+    #[test]
+    fn removing_the_main_folder_warns_only_when_imports_would_wait() {
+        use LibraryRootKind::{Library, ManualImport};
+        // Main plus one other library folder: the other is used, no wait.
+        let two = [
+            root(1, Library, true),
+            root(2, Library, false),
+            root(3, ManualImport, false),
+        ];
+        let main = MainFolder::of(&two);
+        let n = library_count(&two);
+        assert_eq!(n, 2);
+        let q = RootRow::of(&two[0]).remove_question(&main, n);
+        assert!(q.contains("go into the other library folder"), "{q}");
+        assert!(!q.contains("wait"), "{q}");
+        // Main plus two others: imports wait for a new pick.
+        let three = [
+            root(1, Library, true),
+            root(2, Library, false),
+            root(4, Library, false),
+        ];
+        let main = MainFolder::of(&three);
+        let q = RootRow::of(&three[0]).remove_question(&main, library_count(&three));
+        assert!(q.contains("wait until you pick another"), "{q}");
+        // The main folder is the only library folder (picked or not):
+        // imports wait for a new one. Manual-import folders don't count.
+        let alone = [root(1, Library, true), root(3, ManualImport, false)];
+        let main = MainFolder::of(&alone);
+        let q = RootRow::of(&alone[0]).remove_question(&main, library_count(&alone));
+        assert!(q.contains("wait until you add another"), "{q}");
+        // Removing a folder that isn't main never mentions imports.
+        for row in [&three[1], &two[2], &alone[1]] {
+            let q = RootRow::of(row).remove_question(&MainFolder::Chosen(1), 3);
+            assert!(!q.contains("imports"), "{q}");
+        }
+        let q = RootRow::of(&three[1]).remove_question(&MainFolder::NeedsPick, 3);
+        assert!(!q.contains("imports"), "{q}");
+    }
+
+    #[test]
+    fn add_library_prompt_until_a_library_folder_exists() {
+        use LibraryRootKind::{Library, ManualImport};
+        let (title, message) = add_library_prompt(&[]).unwrap();
+        assert_eq!(title, "No library folders yet");
+        assert!(message.contains("won't create the directory"));
+        // Manual-import folders alone still need a library folder.
+        let manual = [root(1, ManualImport, false), root(2, ManualImport, false)];
+        let (title, message) = add_library_prompt(&manual).unwrap();
+        assert_eq!(title, "No library folder yet");
+        assert!(message.contains("manual-import"));
+        assert!(message.contains("already exists"));
+        assert!(message.contains("won't create the directory"));
+        assert_eq!(library_count(&manual), 0);
+        // Any library folder ends it.
+        assert_eq!(
+            add_library_prompt(&[root(1, ManualImport, false), root(2, Library, false)]),
+            None
+        );
+        assert_eq!(add_library_prompt(&[root(2, Library, false)]), None);
     }
 
     #[test]
