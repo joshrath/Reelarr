@@ -494,4 +494,379 @@ pub async fn run(factory: &dyn StoreFactory) {
     registry_selects_the_matching_source_and_concurrent_handoffs_import_once(factory).await;
     missing_cleanup_is_also_best_effort_and_emits_a_message(factory).await;
     attempt_import_keeps_retryable_failures_ready_and_finishes_the_rest(factory).await;
+    a_cancel_during_a_successful_import_completes_and_cleans_up(factory).await;
+    a_cancel_during_a_failed_import_stays_cancelled_without_cleanup(factory).await;
+    only_a_cancelled_job_can_be_completed_by_its_import(factory).await;
+    a_store_error_after_the_claim_does_not_leave_the_job_importing(factory).await;
+}
+
+/// Cancels the job while "importing", then answers `result`.
+struct CancelDuring {
+    store: Arc<dyn JobStore>,
+    result: ImportResult,
+}
+
+#[async_trait]
+impl ImportHandler for CancelDuring {
+    async fn import(&self, download: CompletedDownload) -> ImportResult {
+        let cancelled = self
+            .store
+            .transition(download.job_id, JobState::Cancelled, None)
+            .await
+            .unwrap();
+        assert_eq!(cancelled.state, JobState::Cancelled);
+        self.result.clone()
+    }
+}
+
+/// #104: the movie is already in the library, so the import wins over a
+/// cancel that landed while it ran.
+async fn a_cancel_during_a_successful_import_completes_and_cleans_up(factory: &dyn StoreFactory) {
+    for retry_in_place in [false, true] {
+        let dir = tempfile::tempdir().unwrap();
+        let output = dir.path().join("output");
+        tokio::fs::create_dir_all(&output).await.unwrap();
+        let store = factory
+            .create(EventHub::default(), Duration::from_millis(250))
+            .await;
+        let download = ready(&*store, DownloadSource::BuiltinNzb, output.clone()).await;
+        let handler = CancelDuring {
+            store: store.clone(),
+            result: imported(),
+        };
+        let cleanup = Arc::new(CleanupProbe::new(store.clone(), false, true));
+        let mut cleanups = CleanupRegistry::default();
+        cleanups.register(DownloadSource::BuiltinNzb, cleanup.clone());
+        let mut receiver = store.events().subscribe();
+        let job = if retry_in_place {
+            match attempt_import(&*store, &handler, &cleanups, download, PathMapping::Local)
+                .await
+                .unwrap()
+            {
+                ImportAttempt::Finished(job) => job,
+                other => panic!("{other:?}"),
+            }
+        } else {
+            run_import(&*store, &handler, &cleanups, download, PathMapping::Local)
+                .await
+                .unwrap()
+        };
+        assert_eq!(job.state, JobState::Completed);
+        assert!(job.failure.is_none());
+        assert_eq!(store.get(job.id).await.unwrap().state, JobState::Completed);
+        assert_eq!(cleanup.calls.load(Ordering::SeqCst), 1);
+        assert!(!output.exists(), "normal cleanup ran");
+        let mut states = Vec::new();
+        let mut kept = false;
+        while let Ok(event) = receiver.try_recv() {
+            match event.kind {
+                JobEventKind::StateChanged { from, to } => states.push((from, to)),
+                JobEventKind::Message { message } => kept |= message.contains("movie was kept"),
+                _ => {}
+            }
+        }
+        assert_eq!(
+            states,
+            [
+                (JobState::ReadyForImport, JobState::Importing),
+                (JobState::Importing, JobState::Cancelled),
+                (JobState::Cancelled, JobState::Completed),
+            ]
+        );
+        assert!(kept);
+    }
+}
+
+/// #104: a failed import keeps today's behavior: the cancel stands.
+async fn a_cancel_during_a_failed_import_stays_cancelled_without_cleanup(
+    factory: &dyn StoreFactory,
+) {
+    for result in [
+        ImportResult::Failed {
+            reason: "library share is offline".into(),
+            retryable: true,
+            code: Some(FailureCode::RootOffline),
+        },
+        ImportResult::Failed {
+            reason: "a different file already exists".into(),
+            retryable: false,
+            code: Some(FailureCode::DestinationConflict),
+        },
+        ImportResult::NoMatch,
+    ] {
+        for retry_in_place in [false, true] {
+            let dir = tempfile::tempdir().unwrap();
+            let store = factory
+                .create(EventHub::default(), Duration::from_millis(250))
+                .await;
+            let download = ready(&*store, DownloadSource::BuiltinNzb, dir.path().to_owned()).await;
+            let id = download.job_id;
+            let handler = CancelDuring {
+                store: store.clone(),
+                result: result.clone(),
+            };
+            let cleanup = Arc::new(CleanupProbe::new(store.clone(), false, true));
+            let mut cleanups = CleanupRegistry::default();
+            cleanups.register(DownloadSource::BuiltinNzb, cleanup.clone());
+            let error = if retry_in_place {
+                attempt_import(&*store, &handler, &cleanups, download, PathMapping::Local)
+                    .await
+                    .unwrap_err()
+            } else {
+                run_import(&*store, &handler, &cleanups, download, PathMapping::Local)
+                    .await
+                    .unwrap_err()
+            };
+            assert!(
+                matches!(error, JobStoreError::Transition(_)),
+                "{result:?}: {error}"
+            );
+            assert_eq!(store.get(id).await.unwrap().state, JobState::Cancelled);
+            assert_eq!(cleanup.calls.load(Ordering::SeqCst), 0);
+            assert!(dir.path().exists());
+        }
+    }
+}
+
+async fn only_a_cancelled_job_can_be_completed_by_its_import(factory: &dyn StoreFactory) {
+    let store = factory
+        .create(EventHub::default(), Duration::from_millis(250))
+        .await;
+    let download = ready(
+        &*store,
+        DownloadSource::BuiltinNzb,
+        PathBuf::from("/downloads/mapped"),
+    )
+    .await;
+    let id = download.job_id;
+    // ReadyForImport (and Importing) are not reconciled.
+    for state in [JobState::ReadyForImport, JobState::Importing] {
+        if state == JobState::Importing {
+            store.transition(id, state, None).await.unwrap();
+        }
+        let before = store.get(id).await.unwrap();
+        assert!(matches!(
+            store.complete_cancelled_import(id).await,
+            Err(JobStoreError::Transition(TransitionError::Illegal { .. }))
+        ));
+        assert_eq!(store.get(id).await.unwrap(), before);
+    }
+    store
+        .transition(id, JobState::Cancelled, None)
+        .await
+        .unwrap();
+    let completed = store.complete_cancelled_import(id).await.unwrap();
+    assert_eq!(completed.state, JobState::Completed);
+    assert_eq!(store.get(id).await.unwrap(), completed);
+    // Completed is terminal: no second reconcile, no cancel.
+    assert!(store.complete_cancelled_import(id).await.is_err());
+    assert!(
+        store
+            .transition(id, JobState::Cancelled, None)
+            .await
+            .is_err()
+    );
+    assert!(matches!(
+        store.complete_cancelled_import(JobId::new()).await,
+        Err(JobStoreError::NotFound(_))
+    ));
+}
+
+/// Wraps a store and fails the listed transitions (each entry once) with a
+/// backend error, as a database outage would.
+struct FlakyStore {
+    inner: Arc<dyn JobStore>,
+    fail: std::sync::Mutex<Vec<JobState>>,
+}
+
+impl FlakyStore {
+    fn new(inner: Arc<dyn JobStore>, fail: &[JobState]) -> Self {
+        Self {
+            inner,
+            fail: std::sync::Mutex::new(fail.to_vec()),
+        }
+    }
+}
+
+#[async_trait]
+impl JobStore for FlakyStore {
+    fn events(&self) -> EventHub {
+        self.inner.events()
+    }
+    async fn insert(&self, job: Job) -> Result<Job, JobStoreError> {
+        self.inner.insert(job).await
+    }
+    async fn get(&self, id: JobId) -> Result<Job, JobStoreError> {
+        self.inner.get(id).await
+    }
+    async fn list(&self) -> Result<Vec<Job>, JobStoreError> {
+        self.inner.list().await
+    }
+    async fn transition(
+        &self,
+        id: JobId,
+        to: JobState,
+        failure: Option<Failure>,
+    ) -> Result<Job, JobStoreError> {
+        let injected = {
+            let mut fail = self.fail.lock().unwrap();
+            fail.iter()
+                .position(|s| *s == to)
+                .map(|i| fail.remove(i))
+                .is_some()
+        };
+        if injected {
+            return Err(JobStoreError::Backend(Box::new(std::io::Error::other(
+                "injected store failure",
+            ))));
+        }
+        self.inner.transition(id, to, failure).await
+    }
+    async fn complete_cancelled_import(&self, id: JobId) -> Result<Job, JobStoreError> {
+        self.inner.complete_cancelled_import(id).await
+    }
+    async fn update_progress(&self, id: JobId, progress: Progress) -> Result<Job, JobStoreError> {
+        self.inner.update_progress(id, progress).await
+    }
+    async fn set_queue_order(
+        &self,
+        id: JobId,
+        priority: Priority,
+        queue_position: u64,
+    ) -> Result<Job, JobStoreError> {
+        self.inner
+            .set_queue_order(id, priority, queue_position)
+            .await
+    }
+    async fn message(&self, id: JobId, message: String) -> Result<Job, JobStoreError> {
+        self.inner.message(id, message).await
+    }
+    async fn recover(&self, id: JobId, files_exist: bool) -> Result<Job, JobStoreError> {
+        self.inner.recover(id, files_exist).await
+    }
+    async fn resume(&self, id: JobId) -> Result<Job, JobStoreError> {
+        self.inner.resume(id).await
+    }
+}
+
+/// #105: a job-store write that fails after the claim puts the job back in
+/// ReadyForImport (a retry for the scheduler), or Failed when that write
+/// fails too; it never stays Importing unless every write fails.
+async fn a_store_error_after_the_claim_does_not_leave_the_job_importing(
+    factory: &dyn StoreFactory,
+) {
+    use JobState::*;
+    let offline = ImportResult::Failed {
+        reason: "library share is offline".into(),
+        retryable: true,
+        code: Some(FailureCode::RootOffline),
+    };
+    let terminal = ImportResult::Failed {
+        reason: "a different file already exists".into(),
+        retryable: false,
+        code: Some(FailureCode::DestinationConflict),
+    };
+    // (handler answer, failing writes, state after attempt_import)
+    let cases = [
+        (imported(), vec![Completed], ReadyForImport),
+        (offline.clone(), vec![ReadyForImport], ReadyForImport),
+        (terminal.clone(), vec![Failed], ReadyForImport),
+        (ImportResult::NoMatch, vec![Failed], ReadyForImport),
+        (imported(), vec![Completed, ReadyForImport], Failed),
+        (offline, vec![ReadyForImport, ReadyForImport], Failed),
+        (terminal, vec![Failed, ReadyForImport, Failed], Importing),
+        (
+            imported(),
+            vec![Completed, ReadyForImport, Failed],
+            Importing,
+        ),
+    ];
+    for (answer, fail, after) in cases {
+        let what = format!("{answer:?} failing {fail:?}");
+        let inner = factory
+            .create(EventHub::default(), Duration::from_millis(250))
+            .await;
+        let download = ready(
+            &*inner,
+            DownloadSource::BuiltinNzb,
+            PathBuf::from("/downloads/mapped"),
+        )
+        .await;
+        let id = download.job_id;
+        let store = FlakyStore::new(inner.clone(), &fail);
+        let handler = ImportProbe::new(inner.clone(), answer.clone());
+        let cleanup = Arc::new(CleanupProbe::new(inner.clone(), false, false));
+        let mut cleanups = CleanupRegistry::default();
+        cleanups.register(DownloadSource::BuiltinNzb, cleanup.clone());
+        let attempt = attempt_import(
+            &store,
+            &handler,
+            &cleanups,
+            download.clone(),
+            PathMapping::Local,
+        )
+        .await;
+        let job = inner.get(id).await.unwrap();
+        assert_eq!(job.state, after, "{what}");
+        assert_eq!(cleanup.calls.load(Ordering::SeqCst), 0, "{what}");
+        match (after, attempt) {
+            (ReadyForImport, Ok(ImportAttempt::Retry { job, failure })) => {
+                assert_eq!(job.state, ReadyForImport);
+                assert!(failure.retryable);
+                assert!(!failure.message.contains("injected"), "{what}");
+            }
+            (Failed, Ok(ImportAttempt::Finished(job))) => {
+                let failure = job.failure.unwrap();
+                assert_eq!(failure.code, FailureCode::Other);
+                assert!(failure.retryable);
+                assert!(!failure.message.contains("injected"), "{what}");
+            }
+            (Importing, Err(JobStoreError::Backend(_))) => {}
+            (_, attempt) => panic!("{what}: {attempt:?}"),
+        }
+        if after == ReadyForImport {
+            // The next attempt (the store is healthy again) finishes normally.
+            // (a retryable answer just waits again).
+            let done = attempt_import(&store, &handler, &cleanups, download, PathMapping::Local)
+                .await
+                .unwrap();
+            let expected = match answer {
+                ImportResult::Imported { .. } => Completed,
+                ImportResult::Failed {
+                    retryable: true, ..
+                } => ReadyForImport,
+                _ => Failed,
+            };
+            let state = match done {
+                ImportAttempt::Finished(job) | ImportAttempt::Retry { job, .. } => job.state,
+            };
+            assert_eq!(state, expected, "{what}");
+        }
+    }
+    // run_import reports the store error, but releases the claim too.
+    let inner = factory
+        .create(EventHub::default(), Duration::from_millis(250))
+        .await;
+    let download = ready(
+        &*inner,
+        DownloadSource::BuiltinNzb,
+        PathBuf::from("/downloads/mapped"),
+    )
+    .await;
+    let store = FlakyStore::new(inner.clone(), &[Completed]);
+    let handler = ImportProbe::new(inner.clone(), imported());
+    let error = run_import(
+        &store,
+        &handler,
+        &CleanupRegistry::default(),
+        download.clone(),
+        PathMapping::Local,
+    )
+    .await
+    .unwrap_err();
+    assert!(matches!(error, JobStoreError::Backend(_)));
+    assert_eq!(
+        inner.get(download.job_id).await.unwrap().state,
+        ReadyForImport
+    );
 }

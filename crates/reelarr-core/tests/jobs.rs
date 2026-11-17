@@ -103,6 +103,31 @@ fn transition_matrix_covers_every_pair_and_context() {
             );
         }
     }
+    // #104: a cancel that landed during an import that then succeeded is
+    // reconciled outside the graph. The graph itself never allows
+    // Cancelled -> Completed; the reconcile allows nothing else.
+    for from in STATES {
+        let mut job = Job::new(JobKind::Nzb, "reconcile");
+        job.state = from;
+        let before = job.clone();
+        let result = apply_cancelled_import_completion(&mut job);
+        if from == Cancelled {
+            assert!(validate_transition(&before, Completed).is_err());
+            assert_eq!(result, Ok(()));
+            assert_eq!(job.state, Completed);
+            assert!(job.failure.is_none() && job.resume_state.is_none());
+        } else {
+            assert_eq!(
+                result,
+                Err(TransitionError::Illegal {
+                    from,
+                    to: Completed
+                }),
+                "{from:?}"
+            );
+            assert_eq!(job, before);
+        }
+    }
     for code in [
         FailureCode::NoMatch,
         FailureCode::Other,

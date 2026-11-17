@@ -2,7 +2,10 @@
 //! restart are imported without NNTP settings, source cleanup runs only after
 //! `Completed`, the agreed retry schedule keeps retryable failures waiting in
 //! `ReadyForImport`, and a cancel never discards files under a running import
-//! (which is not in the download-worker registry).
+//! (which is not in the download-worker registry). An import that succeeds
+//! after a cancel wins (#104), a job-store error after the claim does not
+//! leave the job in `Importing` (#105), and a cancel drops the import retry
+//! wait (#106).
 use std::{
     collections::VecDeque,
     path::{Path, PathBuf},
@@ -110,6 +113,14 @@ impl ImportHandler for Script {
     }
 }
 
+fn conflict() -> ImportResult {
+    ImportResult::Failed {
+        reason: "a different file already exists".into(),
+        retryable: false,
+        code: Some(FailureCode::DestinationConflict),
+    }
+}
+
 fn imported() -> ImportResult {
     ImportResult::Imported {
         media_file_id: MediaFileId(1),
@@ -118,6 +129,7 @@ fn imported() -> ImportResult {
 
 struct Env {
     _dir: tempfile::TempDir,
+    db: Database,
     staging: PathBuf,
     output: PathBuf,
     jobs: Arc<SqliteJobStore>,
@@ -154,6 +166,7 @@ async fn env(config: SupervisorConfig) -> Env {
     );
     Env {
         _dir: dir,
+        db,
         staging,
         output,
         jobs,
@@ -466,7 +479,9 @@ async fn discard_waits_for_a_leftover_import_outside_the_download_registry() {
     let staging = e.staging.join(id.to_string());
     let publish = e.output.join(format!(".reelarr-publish-{id}"));
     let gate = Arc::new(Semaphore::new(0));
-    let script = e.script(vec![imported()], Some(gate.clone()));
+    // The import fails, so the cancel stands (a successful one wins; see
+    // `a_cancel_during_an_import_that_succeeds_keeps_the_movie_and_cleans_up`).
+    let script = e.script(vec![conflict()], Some(gate.clone()));
     e.supervisor.start().await.unwrap();
     wait("import running", || {
         let n = script.seen().len();
@@ -584,5 +599,179 @@ async fn a_folder_change_during_an_attempt_retries_it_at_once() {
     gate.add_permits(2);
     e.wait_state(id, JobState::Completed).await;
     assert_eq!(script.seen().len(), 2);
+    e.supervisor.shutdown().await;
+}
+
+/// #104: a cancel (and discard) that lands while an import runs, and the
+/// import then succeeds: the movie stays, the job is Completed, the normal
+/// cleanup runs, and the deferred discard does not run as well.
+#[tokio::test]
+async fn a_cancel_during_an_import_that_succeeds_keeps_the_movie_and_cleans_up() {
+    let e = env(config(IMPORT_RETRY.to_vec())).await;
+    let (id, published) = e.leftover(Some(MovieId(1))).await;
+    let staging = e.staging.join(id.to_string());
+    let publish = e.output.join(format!(".reelarr-publish-{id}"));
+    let gate = Arc::new(Semaphore::new(0));
+    let script = e.script(vec![imported()], Some(gate.clone()));
+    let mut events = e.jobs.events().subscribe();
+    e.supervisor.start().await.unwrap();
+    wait("import running", || {
+        let n = script.seen().len();
+        async move { n == 1 }
+    })
+    .await;
+    assert_eq!(e.supervisor.importing(), [id]);
+    assert_eq!(
+        e.supervisor.cancel(id).await.unwrap().state,
+        JobState::Cancelled
+    );
+    assert_eq!(
+        e.supervisor.discard(id).await.unwrap(),
+        Discarded::WhenStopped
+    );
+    // What the importer put in the library (hardlinked from the download).
+    let library = e._dir.path().join("library");
+    std::fs::create_dir_all(&library).unwrap();
+    let movie = library.join("Leftover Movie (2020).mkv");
+    std::fs::hard_link(published.join("a.mkv"), &movie).unwrap();
+    gate.add_permits(1);
+
+    e.wait_state(id, JobState::Completed).await;
+    wait("import settled", || {
+        let idle = e.supervisor.importing().is_empty();
+        async move { idle }
+    })
+    .await;
+    let job = e.jobs.get(id).await.unwrap();
+    assert!(job.failure.is_none());
+    // The normal cleanup ran: staging and the published folder are gone.
+    assert!(!exists(&published));
+    assert!(!exists(&staging));
+    // The deferred discard was dropped: it alone removes this folder.
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    assert!(exists(&publish.join("partial.mkv")));
+    // The movie stays in the library.
+    assert_eq!(std::fs::read(&movie).unwrap(), b"movie");
+    // A later discard does not touch a Completed job.
+    assert!(e.supervisor.discard(id).await.is_err());
+    assert!(exists(&publish.join("partial.mkv")));
+    assert!(e.supervisor.import_waiting().is_empty());
+    let mut reconciled = false;
+    while let Ok(event) = events.try_recv() {
+        if let reelarr_core::JobEventKind::StateChanged { from, to } = event.kind {
+            reconciled |= from == JobState::Cancelled && to == JobState::Completed;
+        }
+    }
+    assert!(reconciled);
+    e.supervisor.shutdown().await;
+}
+
+/// #106: cancelling a job that waits on the import retry clock drops its
+/// wait instead of leaving a stale entry behind.
+#[tokio::test]
+async fn cancelling_a_job_on_its_import_retry_wait_drops_the_wait() {
+    let e = env(config(vec![Duration::from_secs(3600)])).await;
+    let (id, _) = e.leftover(Some(MovieId(1))).await;
+    let script = e.script(vec![no_default_root()], None);
+    e.supervisor.start().await.unwrap();
+    wait("first attempt done", || {
+        let n = script.seen().len();
+        let idle = e.supervisor.importing().is_empty();
+        async move { n == 1 && idle }
+    })
+    .await;
+    assert_eq!(e.supervisor.import_waiting(), [id]);
+    e.supervisor.cancel(id).await.unwrap();
+    assert!(e.supervisor.import_waiting().is_empty());
+    assert_eq!(e.supervisor.discard(id).await.unwrap(), Discarded::Now);
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    assert_eq!(script.seen().len(), 1);
+    assert!(e.supervisor.import_waiting().is_empty());
+    e.supervisor.shutdown().await;
+}
+
+/// Fails (SQLite abort) the Completed write after an import, as a database
+/// error would.
+const FAIL_COMPLETED: &str = "CREATE TRIGGER inject_store_error \
+    BEFORE UPDATE OF state ON jobs \
+    WHEN OLD.state = 'importing' AND NEW.state = 'completed' \
+    BEGIN SELECT RAISE(ABORT, 'injected store failure'); END";
+
+/// Fails every state change out of Importing.
+const FAIL_LEAVING_IMPORTING: &str = "CREATE TRIGGER inject_store_error \
+    BEFORE UPDATE OF state ON jobs \
+    WHEN OLD.state = 'importing' AND NEW.state <> 'importing' \
+    BEGIN SELECT RAISE(ABORT, 'injected store failure'); END";
+
+impl Env {
+    async fn break_store(&self, trigger: &'static str) {
+        sqlx::query(trigger).execute(self.db.pool()).await.unwrap();
+    }
+
+    async fn fix_store(&self) {
+        sqlx::query("DROP TRIGGER inject_store_error")
+            .execute(self.db.pool())
+            .await
+            .unwrap();
+    }
+}
+
+/// #105: the Completed write fails after a successful import. The job goes
+/// back to ReadyForImport on the retry wait, not stuck in Importing, and
+/// imports once the store works again.
+#[tokio::test]
+async fn a_store_error_after_the_claim_returns_the_job_to_ready_for_import() {
+    let e = env(config(vec![Duration::from_millis(200)])).await;
+    let (id, published) = e.leftover(Some(MovieId(1))).await;
+    e.break_store(FAIL_COMPLETED).await;
+    let script = e.script(vec![imported()], None);
+    e.supervisor.start().await.unwrap();
+    wait("first attempt done", || {
+        let n = script.seen().len();
+        let idle = e.supervisor.importing().is_empty();
+        async move { n >= 1 && idle }
+    })
+    .await;
+    let job = e.jobs.get(id).await.unwrap();
+    assert_eq!(job.state, JobState::ReadyForImport);
+    assert!(job.failure.is_none());
+    assert!(exists(&published), "no cleanup without Completed");
+    e.fix_store().await;
+    e.wait_state(id, JobState::Completed).await;
+    assert!(script.seen().len() >= 2);
+    wait("cleanup", || {
+        let gone = !exists(&published);
+        async move { gone }
+    })
+    .await;
+    e.supervisor.shutdown().await;
+}
+
+/// #105: every write out of Importing fails, so the import cannot release
+/// its claim. The scheduler remembers the job and moves it back to
+/// ReadyForImport once the store works, without a restart.
+#[tokio::test]
+async fn a_job_stranded_in_importing_is_released_without_a_restart() {
+    let e = env(config(vec![Duration::from_millis(200)])).await;
+    let (id, _) = e.leftover(Some(MovieId(1))).await;
+    e.break_store(FAIL_LEAVING_IMPORTING).await;
+    let script = e.script(vec![imported()], None);
+    e.supervisor.start().await.unwrap();
+    wait("first attempt done", || {
+        let n = script.seen().len();
+        let idle = e.supervisor.importing().is_empty();
+        async move { n >= 1 && idle }
+    })
+    .await;
+    assert_eq!(e.jobs.get(id).await.unwrap().state, JobState::Importing);
+    assert_eq!(e.supervisor.import_waiting(), [id]);
+    e.fix_store().await;
+    e.wait_state(id, JobState::Completed).await;
+    assert_eq!(script.seen().len(), 2);
+    wait("wait dropped", || {
+        let none = e.supervisor.import_waiting().is_empty();
+        async move { none }
+    })
+    .await;
     e.supervisor.shutdown().await;
 }

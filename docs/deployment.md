@@ -255,31 +255,34 @@ are checked with PAR2; repair itself is not supported yet.
 ### Import
 
 A finished download is imported into the library right away: the movie it was
-grabbed for is placed in that movie's existing library folder, else the
-default import folder, else the only library folder. A single library folder
-is used without being marked as the default. With no library folder, or with
-several and no default (for example sibling `movies`, `tvshows` and `music`
-folders on one drive), the job waits in `ReadyForImport` with
-`NoDefaultRoot` until a folder is added or the default is picked
-(`PUT /api/v1/library/roots/{id}/default`, or `"is_default": true` when adding
-one); it is then imported at once rather than after its retry wait. Only a
-library folder (not a manual-import folder) can be the default, at most one
-is, and removing it leaves no default. Reelarr picks no default by folder
-name, and adding a library folder never creates the directory: register a
-folder that already exists or will be mounted there. The file is hardlinked when the library shares a filesystem
-with `$REELARR_DOWNLOADS_DIR`, otherwise copied; the library mount must be
-writable for this (see the `rw` notes above). Imports run one at a time beside
-downloads and do not need a Usenet provider. Downloads that were already
-waiting to import when the server stopped, or were interrupted mid-import, are
-imported after the next start.
+grabbed for is placed in that movie's existing library folder, else the default
+import folder, else the only library folder. A single library folder is used
+without being marked as the default. With no library folder, or with several and
+no default (for example sibling `movies`, `tvshows` and `music` folders on one
+drive), the job waits in `ReadyForImport` with `NoDefaultRoot` until a folder is
+added or the default is picked (`PUT /api/v1/library/roots/{id}/default`, or
+`"is_default": true` when adding one); it is then imported at once rather than
+after its retry wait. Only a library folder (not a manual-import folder) can be
+the default, at most one is, and removing it leaves no default. Reelarr picks no
+default by folder name, and adding a library folder never creates the directory:
+register a folder that already exists or will be mounted there. The file is
+hardlinked when the library shares a filesystem with `$REELARR_DOWNLOADS_DIR`,
+otherwise copied; the library mount must be writable for this (see the `rw`
+notes above). Imports run one at a time beside downloads and do not need a
+Usenet provider. Downloads that were already waiting to import when the server
+stopped, or were interrupted mid-import, are imported after the next start.
 
 Only after a job is `Completed` are its staging files and published folder in
 `complete/` removed. A failed or cancelled import never triggers that cleanup;
-cancel removes only staging files and any unfinished publication, and waits until a running import of the job
-has finished first. An import that may succeed later (library folder offline,
-for example) keeps the job in `ReadyForImport` and tries again after 1, 5 and
-15 minutes, then every 30 minutes; the reason is sent as a job message. The
-wait restarts from the beginning after a server restart. Other failures, and
+cancel removes only staging files and any unfinished publication, and waits
+until a running import of the job has finished first. If that import still
+succeeds, the movie is kept: the job becomes `Completed` and the normal cleanup
+runs instead. If the job database fails partway through an import, the job goes
+back to `ReadyForImport` and is retried like below, rather than staying
+`Importing` until a restart. An import that may succeed later (library folder
+offline, for example) keeps the job in `ReadyForImport` and tries again after 1,
+5 and 15 minutes, then every 30 minutes; the reason is sent as a job message.
+The wait restarts from the beginning after a server restart. Other failures, and
 releases that match no movie (`NoMatch`), move the job to `Failed` with that
 code.
 

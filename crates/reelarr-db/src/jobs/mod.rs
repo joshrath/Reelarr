@@ -10,7 +10,8 @@ use std::{
 use async_trait::async_trait;
 use reelarr_core::{
     EventHub, Failure, Job, JobEvent, JobEventKind, JobId, JobState, JobStore, JobStoreError,
-    Priority, Progress, TransitionError, apply_transition, recover_after_restart,
+    Priority, Progress, TransitionError, apply_cancelled_import_completion, apply_transition,
+    recover_after_restart,
 };
 use sqlx::{SqliteConnection, SqlitePool};
 use tokio::sync::Mutex;
@@ -471,6 +472,17 @@ impl JobStore for SqliteJobStore {
             let from = job.state;
             apply_transition(job, to, failure)?;
             Ok(JobEventKind::StateChanged { from, to })
+        })
+        .await
+    }
+
+    async fn complete_cancelled_import(&self, id: JobId) -> Result<Job, JobStoreError> {
+        self.mutate(id, |job| {
+            apply_cancelled_import_completion(job)?;
+            Ok(JobEventKind::StateChanged {
+                from: JobState::Cancelled,
+                to: JobState::Completed,
+            })
         })
         .await
     }
