@@ -2046,7 +2046,9 @@ a { color: var(--color-primary); }
   justify-content: space-between;
   gap: var(--space-sm);
 }
-.vault-actions { display: flex; flex-wrap: wrap; gap: var(--space-xs); }
+.vault-actions { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: var(--space-xs); }
+.vault .button:not(.button-danger-solid) { background: var(--color-surface-container-high); }
+.vault .button:not(.button-danger-solid):hover { background: var(--color-surface-bright); }
 
 /* Forms on the console. */
 .staff-form {
@@ -2058,6 +2060,8 @@ a { color: var(--color-primary); }
   background: var(--color-surface-container);
 }
 .staff-form-title { margin: 0; text-transform: uppercase; }
+.staff-form .button:not(.primary):not(.button-danger-solid) { background: var(--color-surface-container-high); }
+.staff-form .button:not(.primary):not(.button-danger-solid):hover { background: var(--color-surface-bright); }
 .staff-field { display: grid; gap: var(--space-xs); align-content: start; min-width: 0; }
 .staff-field input, .staff-field select { width: 100%; }
 .staff-hint { font: var(--type-body-sm); color: var(--color-on-surface-variant); }
@@ -2077,14 +2081,17 @@ a { color: var(--color-primary); }
 .staff-form .staff-choice { text-transform: none; font: var(--type-body-md); letter-spacing: normal; color: var(--color-on-surface); }
 .staff-choice input { width: 1.125rem; height: 1.125rem; accent-color: var(--color-primary); }
 .staff-fieldset {
-  display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(9rem, 1fr));
-  gap: var(--space-md);
   padding: var(--space-md);
   border-radius: var(--radius-sm);
   background: var(--color-surface-container-low);
 }
-.staff-fieldset legend { float: left; width: 100%; margin-bottom: var(--space-xs); }
+.staff-fieldset legend { float: left; width: 100%; margin-bottom: var(--space-sm); }
+.staff-fieldset-grid {
+  clear: both;
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(9rem, 1fr));
+  gap: var(--space-md);
+}
 .staff-outcome:empty { display: none; }
 .staff-outcome-line {
   display: flex;

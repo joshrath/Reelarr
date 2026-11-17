@@ -793,6 +793,7 @@ fn NntpSection() -> AnyView {
                     </Show>
                     <fieldset class="staff-fieldset staff-field-wide">
                         <legend>"Connection limits"</legend>
+                        <div class="staff-fieldset-grid">
                         <div class="staff-field">
                             <label for="nntp-connections">"Connections"</label>
                             <input
@@ -840,6 +841,7 @@ fn NntpSection() -> AnyView {
                                 aria-invalid=bad(NntpField::Retries)
                                 bind:value=fields.max_retries
                             />
+                        </div>
                         </div>
                     </fieldset>
                     <div id="nntp-outcome" class="staff-outcome staff-field-wide" role="status" aria-live="polite">
