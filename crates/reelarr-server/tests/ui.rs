@@ -345,3 +345,43 @@ async fn counter_keeps_the_query_without_inventing_results() {
     assert!(!body.contains("1 result"));
     assert!(!body.contains("IN STOCK"));
 }
+
+#[tokio::test]
+async fn back_room_renders_the_lab_while_checking() {
+    let (status, content_type, body) = get("/back-room").await;
+    assert_eq!(status, 200);
+    assert!(content_type.starts_with("text/html"));
+    assert!(body.contains(r#"<h1 id="page-title">The Back Room</h1>"#));
+    // The session and jobs are read in the browser: the server sends the
+    // lab with empty readouts and a loading status.
+    assert!(body.contains(r#"aria-label="Lab status""#));
+    for readout in ["Feed", "On the decks", "Downloading", "Throughput"] {
+        assert!(body.contains(readout), "{readout}");
+    }
+    assert!(body.contains(r#"aria-labelledby="decks-title""#));
+    assert!(body.contains("Dubbing decks"));
+    assert!(body.contains("Checking the back room"));
+    // No sample jobs, engines or speeds from the design.
+    for made_up in [
+        "ALIEN",
+        "Alien",
+        "ROMULUS",
+        "TWIN PEAKS",
+        "Twin Peaks",
+        "BAY-03",
+        "D-88",
+        "04 ONLINE",
+        "Radarr",
+        "Sonarr",
+        "MB/s",
+        "DECK 01",
+        "Deck 01",
+        "78%",
+    ] {
+        assert!(!body.contains(made_up), "{made_up}");
+    }
+    assert!(!body.contains(r#"role="progressbar""#));
+    // The Back Room is its own section, and the deck stays empty.
+    assert!(body.contains(r#"<a href="/back-room" aria-current="page""#));
+    assert!(body.contains("No tape in the deck"));
+}

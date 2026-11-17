@@ -2786,6 +2786,7 @@ dependencies = [
  "leptos_meta",
  "leptos_router",
  "reelarr-types",
+ "send_wrapper",
  "serde",
  "serde_json",
  "tokio",
