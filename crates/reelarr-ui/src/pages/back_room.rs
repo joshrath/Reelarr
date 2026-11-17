@@ -16,8 +16,8 @@ use crate::components::confirm::Confirm;
 use crate::components::icon::{Icon, IconName};
 use crate::jobs::{
     Applied, Feed, Frame, JOBS_PATH, JobAction, JobCard, PRIORITIES, Telemetry, apply_event,
-    is_finished, parse_frame, priority_from_value, priority_label, priority_path, priority_value,
-    telemetry, waiting_for_import,
+    cancel_question, is_finished, parse_frame, priority_from_value, priority_label, priority_path,
+    priority_value, telemetry, waiting_for_import,
 };
 use crate::library::SETTINGS_PATH;
 use crate::playback::SIGN_IN_PATH;
@@ -144,7 +144,7 @@ fn TelemetryStrip(
 fn DeckFrame(children: Children) -> impl IntoView {
     view! {
         <section class="lab-decks" aria-labelledby="decks-title">
-            <h2 id="decks-title" class="lab-section-title">
+            <h2 id="decks-title" class="lab-section-title" tabindex="-1">
                 <Icon name=IconName::Downloading />
                 "Dubbing decks"
             </h2>
@@ -673,9 +673,12 @@ fn Deck(
                         id=format!("cancel-{cancel_id}")
                         trigger="Cancel…"
                         trigger_label=format!("Cancel {cancel_title}")
-                        question=format!(
-                            "Cancel “{cancel_title}”? Reelarr stops it and deletes what it downloaded so far.",
-                        )
+                        question={
+                            let title = cancel_title.clone();
+                            Signal::derive(move || {
+                                state().map(|s| cancel_question(&title, s)).unwrap_or_default()
+                            })
+                        }
                         confirm="Yes, cancel job"
                         keep="Keep it"
                         on_confirm={
@@ -684,6 +687,7 @@ fn Deck(
                             move |()| act.run((id.clone(), title.clone(), JobAction::Cancel))
                         }
                         busy=is_busy
+                        focus_after="decks-title"
                     />
                 </Show>
             </div>
@@ -743,8 +747,12 @@ mod live {
             on_open: Rc<dyn Fn()>,
             on_error: Rc<dyn Fn(bool)>,
         ) -> Option<Self> {
-            let source = web_sys::EventSource::new(path).ok()?;
-            let mut listeners = Vec::new();
+            // Built first so any early return below drops it, which closes
+            // the source instead of leaving a half-wired feed open.
+            let mut stream = Self {
+                source: web_sys::EventSource::new(path).ok()?,
+                _listeners: Vec::new(),
+            };
             for name in ["snapshot", "job"] {
                 let on_frame = on_frame.clone();
                 let listener = Listener::new(move |event: web_sys::Event| {
@@ -755,28 +763,24 @@ mod live {
                         on_frame(name, &data);
                     }
                 });
-                source
-                    .add_event_listener_with_callback(name, listener.as_ref().unchecked_ref())
-                    .ok()?;
-                listeners.push(listener);
+                stream.listen(name, listener)?;
             }
-            let opened = Listener::new(move |_| on_open());
-            source
-                .add_event_listener_with_callback("open", opened.as_ref().unchecked_ref())
-                .ok()?;
-            listeners.push(opened);
-            let watched = source.clone();
+            stream.listen("open", Listener::new(move |_| on_open()))?;
+            let watched = stream.source.clone();
             let errored = Listener::new(move |_| {
                 on_error(watched.ready_state() == web_sys::EventSource::CLOSED);
             });
-            source
-                .add_event_listener_with_callback("error", errored.as_ref().unchecked_ref())
+            stream.listen("error", errored)?;
+            Some(stream)
+        }
+
+        /// Attaches `listener` and keeps it alive with the stream.
+        fn listen(&mut self, name: &str, listener: Listener) -> Option<()> {
+            self.source
+                .add_event_listener_with_callback(name, listener.as_ref().unchecked_ref())
                 .ok()?;
-            listeners.push(errored);
-            Some(Self {
-                source,
-                _listeners: listeners,
-            })
+            self._listeners.push(listener);
+            Some(())
         }
     }
 

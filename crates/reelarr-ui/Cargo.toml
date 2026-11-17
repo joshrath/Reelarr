@@ -33,6 +33,7 @@ web-sys = { workspace = true, features = [
     "EventSource",
     "Headers",
     "HtmlDocument",
+    "HtmlElement",
     "HtmlMediaElement",
     "HtmlVideoElement",
     "MediaError",

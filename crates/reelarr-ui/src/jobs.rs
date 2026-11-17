@@ -63,6 +63,28 @@ impl JobAction {
     }
 }
 
+/// The confirm question for cancelling a job in `state`. It only promises
+/// to delete files where the server does: a cancel during an import stops
+/// the job, but whatever the import already moved into the library stays.
+pub fn cancel_question(title: &str, state: JobState) -> String {
+    let what = match state {
+        JobState::Queued => "Reelarr takes it out of the queue.",
+        JobState::Importing => {
+            "Reelarr stops the job. Anything the import already moved into the library stays there."
+        }
+        JobState::ReadyForImport => {
+            "Reelarr stops it and deletes the downloaded files instead of importing them."
+        }
+        JobState::Downloading
+        | JobState::Paused
+        | JobState::Verifying
+        | JobState::Repairing
+        | JobState::Extracting => "Reelarr stops it and deletes what it downloaded so far.",
+        JobState::Completed | JobState::Failed | JobState::Cancelled => "Reelarr stops the job.",
+    };
+    format!("Cancel “{title}”? {what}")
+}
+
 /// `PUT /api/v1/jobs/{id}/priority`.
 pub fn priority_path(id: &str) -> Option<String> {
     is_job_id(id).then(|| format!("{JOBS_PATH}/{id}/priority"))
@@ -419,6 +441,29 @@ mod tests {
         }
     }
 
+    #[test]
+    fn cancel_copy_never_promises_deletion_mid_import() {
+        let importing = cancel_question("Title A", JobState::Importing);
+        assert!(importing.starts_with("Cancel “Title A”?"));
+        assert!(!importing.contains("delete"), "{importing}");
+        assert!(importing.contains("stays"));
+        for state in [
+            JobState::Downloading,
+            JobState::Paused,
+            JobState::Verifying,
+            JobState::Repairing,
+            JobState::Extracting,
+        ] {
+            assert!(
+                cancel_question("Title A", state).contains("deletes what it downloaded so far"),
+                "{state:?}"
+            );
+        }
+        assert!(cancel_question("Title A", JobState::Queued).contains("out of the queue"));
+        assert!(
+            cancel_question("Title A", JobState::ReadyForImport).contains("instead of importing")
+        );
+    }
     #[test]
     fn only_uuid_ids_make_paths() {
         assert!(is_job_id(ID));
