@@ -15,7 +15,8 @@ use crate::api::{ApiFailure, get_json};
 use crate::components::clamshell::CaseArt;
 use crate::components::icon::{Icon, IconName};
 use crate::library::{
-    CaseState, CaseTape, DeckReadiness, case_notice_message, case_state, watch_path,
+    CaseState, CaseTape, DeckReadiness, case_notice_message, case_offers_retry, case_state,
+    watch_path,
 };
 use crate::playback::{Notice, SIGN_IN_PATH, UNSUPPORTED_MESSAGE, parse_media_id, playback_path};
 
@@ -191,7 +192,7 @@ fn CaseNotice(notice: Notice, on_retry: Option<Callback<()>>) -> AnyView {
         Notice::SignIn => {
             Some(view! { <a class="button primary" href=SIGN_IN_PATH>"Sign in"</a> }.into_any())
         }
-        Notice::TryAgain => on_retry.map(|retry| {
+        _ if case_offers_retry(&notice) => on_retry.map(|retry| {
             view! {
                 <button type="button" class="button primary" on:click=move |_| retry.run(())>
                     "Try again"

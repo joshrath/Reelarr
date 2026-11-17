@@ -1034,6 +1034,14 @@ a { color: var(--color-primary); }
   color: var(--color-primary);
 }
 .shelf-card-alert .shelf-card-title { color: var(--color-secondary); }
+/* Says "Library folder problem" in words, so the alert isn't colour alone. */
+.shelf-card-flag {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-xs);
+  color: var(--color-secondary);
+}
+.shelf-card-flag .icon { width: 1rem; height: 1rem; }
 .shelf-actions { display: flex; flex-wrap: wrap; gap: var(--space-sm); padding-top: var(--space-xs); }
 .shelf-actions .button { text-decoration: none; }
 
