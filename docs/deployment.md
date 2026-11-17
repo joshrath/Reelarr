@@ -203,3 +203,107 @@ DTOs**. API integrations must use `list_summaries/get_summary` or an explicit
 secret-free projection; the summaries contain only name, enabled, ordered extra
 hosts and `has_api_key`, never ciphertext or plaintext. The store's errors/debug
 and database statement logging do not expose secrets or SQL bind values.
+
+## NNTP provider settings (#76)
+
+The server now initializes the secret cipher at startup, after migrations and
+before binding: `REELARR_SECRET_KEY` if set, otherwise
+`$REELARR_DATA_DIR/secret.key` (created on first start, mode 0600). An invalid
+key stops startup with a static error that never includes the value. The same
+key protects indexer API keys and the NNTP password, so the backup/recovery
+notes above apply to both.
+
+Reelarr talks to **one** NNTP provider (no multi-server fallback yet), always
+over implicit TLS (normally port 563) with certificate-chain and hostname
+verification against the system trust store. Port 119 (plaintext NNTP) is
+rejected. Configure it through the authenticated API:
+
+| Method | Path | Notes |
+| --- | --- | --- |
+| `GET` | `/api/v1/settings/nntp` | Settings plus `has_password`; 404 `not_configured` if unset |
+| `PUT` | `/api/v1/settings/nntp` | Save; CSRF required |
+| `DELETE` | `/api/v1/settings/nntp` | Forget the provider and password; CSRF required |
+| `POST` | `/api/v1/settings/nntp/test` | TLS + login check of the posted settings, without saving; CSRF required |
+
+The password is write-only. Send `{"action":"set","value":"…"}` to replace it,
+`{"action":"clear"}` to remove it, or `{"action":"keep"}` (or omit the field)
+to leave it unchanged. `keep` is refused with `password_required` when the host
+changes, so a saved password is never sent to a different server without being
+re-entered. Bounds: 1–100 connections, 1–300 second connect/IO timeouts, 0–10
+retries. The test-connection request fetches no article and the whole attempt
+is limited by the connect timeout.
+
+Saved settings apply to new work only. New jobs use a pool built from the new
+settings, while downloads already running finish on the pool they started with;
+running downloads are never interrupted. The old pool is closed once its last
+download ends. With no provider configured (or a disabled one), downloads stay
+queued until one is saved.
+
+## Built-in downloader (#76)
+
+The download scheduler starts after restart recovery and before the listener is
+bound. It works in `$REELARR_DOWNLOADS_DIR` (default `/downloads/reelarr`, inside
+the `/downloads` volume): `incomplete/` holds per-job staging and `complete/`
+the finished downloads waiting for import. The folder must belong to Reelarr
+alone. `REELARR_MAX_ACTIVE_DOWNLOADS` (default 2) limits how many jobs run at
+once; the provider's connections are split evenly between them. Jobs start in
+priority order, then queue position. A higher-priority job waits for a free slot
+and never interrupts a running one. On shutdown (SIGTERM or Ctrl-C) running
+downloads stop at a checkpoint and resume on the next start. Damaged downloads
+are checked with PAR2; repair itself is not supported yet.
+
+### Import
+
+A finished download is imported into the library right away: the movie it was
+grabbed for is placed in that movie's existing library folder, else the only
+library folder (with several folders and no import default the job fails with
+`NoDefaultRoot`). The file is hardlinked when the library shares a filesystem
+with `$REELARR_DOWNLOADS_DIR`, otherwise copied; the library mount must be
+writable for this (see the `rw` notes above). Imports run one at a time beside
+downloads and do not need a Usenet provider. Downloads that were already
+waiting to import when the server stopped, or were interrupted mid-import, are
+imported after the next start.
+
+Only after a job is `Completed` are its staging files and published folder in
+`complete/` removed. A failed or cancelled import never triggers that cleanup;
+cancel removes only staging files and any unfinished publication, and waits until a running import of the job
+has finished first. An import that may succeed later (library folder offline,
+for example) keeps the job in `ReadyForImport` and tries again after 1, 5 and
+15 minutes, then every 30 minutes; the reason is sent as a job message. The
+wait restarts from the beginning after a server restart. Other failures, and
+releases that match no movie (`NoMatch`), move the job to `Failed` with that
+code.
+
+### Job API
+
+All routes need a signed-in session (401 otherwise). `POST` and `PUT` also need
+the `X-CSRF-Token` header matching the `reelarr_csrf` cookie (403 otherwise).
+
+| Method | Path | Purpose |
+| --- | --- | --- |
+| `GET` | `/api/v1/jobs` | All jobs in scheduling order: state, progress, failure, priority, queue position |
+| `GET` | `/api/v1/jobs/{id}` | One job |
+| `POST` | `/api/v1/jobs/upload` | Raw NZB as the body (32 MiB max, 413 `nzb_too_large` above it); optional `title`, `category`, `movie_id`, `priority` query parameters; 201 with the job |
+| `POST` | `/api/v1/jobs/release` | `{indexer, download_url, title, category?, movie_id?, priority?}`: fetch the NZB through that indexer's shared client and queue it; 201 with the job |
+| `POST` | `/api/v1/jobs/{id}/pause` | Pause a queued or downloading job |
+| `POST` | `/api/v1/jobs/{id}/resume` | Put a paused job back in the queue |
+| `POST` | `/api/v1/jobs/{id}/cancel` | Cancel, then remove the job's staging files once its run has stopped |
+| `PUT` | `/api/v1/jobs/{id}/priority` | `{priority: force\|high\|normal\|low}` |
+| `PUT` | `/api/v1/jobs/order` | `{job_ids: [...]}`: those unfinished jobs move to the front in that order, the rest keep their order behind them; one transaction |
+| `GET` | `/api/v1/jobs/events` | Server-Sent Events, below |
+
+Jobs sort by priority first, then queue position. A release `download_url`
+must be on the indexer's own origin or HTTPS to one of its
+`extra_download_hosts`, on every redirect; it is never echoed back or logged.
+Responses never include the NZB document, its archive passwords, indexer API
+keys or NNTP credentials.
+
+**Events.** The stream starts with an `event: snapshot` frame (`{"jobs": [...]}`,
+the same shape as `GET /api/v1/jobs`). Each following `event: job` frame is one
+job event with that job's `seq`; events at or below the job's snapshot
+`last_event_seq` are not sent. The server keeps a bounded buffer per stream. If
+a client falls behind, it receives a new `snapshot` frame and continues from
+there. Replace all job state on every `snapshot`. **This is not a durable
+replay log.** Frames have no SSE `id`, `Last-Event-ID` is ignored, and every
+reconnect starts with a fresh snapshot. Gaps in `seq` are normal, because
+progress is throttled and numbering skips ahead after a restart.

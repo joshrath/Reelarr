@@ -5,7 +5,7 @@ use std::{
 
 use async_trait::async_trait;
 use reelarr_core::*;
-use reelarr_db::{Database, SqliteJobStore};
+use reelarr_db::{Database, ReorderError as ReorderErr, SqliteJobStore};
 use sqlx::Row;
 
 #[path = "../../reelarr-core/tests/support/import.rs"]
@@ -433,4 +433,102 @@ async fn unsigned_queue_ordering_and_sequence_exhaustion_do_not_wrap() {
     ));
     assert_eq!(store.get(id).await.unwrap().state, JobState::Queued);
     db.pool().close().await;
+}
+
+#[tokio::test]
+async fn reorder_is_atomic_and_only_touches_moved_unfinished_jobs() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = Database::connect(dir.path().join("reelarr.db"))
+        .await
+        .unwrap();
+    let store = SqliteJobStore::new(&db);
+    let mut ids = Vec::new();
+    for title in ["a", "b", "c", "d"] {
+        ids.push(
+            store
+                .insert(Job::new(JobKind::Nzb, title))
+                .await
+                .unwrap()
+                .id,
+        );
+    }
+    let done = store
+        .insert(Job::new(JobKind::Nzb, "done"))
+        .await
+        .unwrap()
+        .id;
+    store
+        .transition(done, JobState::Cancelled, None)
+        .await
+        .unwrap();
+    let before = store.list().await.unwrap();
+    let mut events = store.events().subscribe();
+
+    // Errors write nothing and publish nothing.
+    let missing = JobId::new();
+    for (front, expect) in [
+        (vec![ids[2], ids[2]], "duplicate"),
+        (vec![ids[3], missing], "missing"),
+        (vec![ids[3], done], "finished"),
+    ] {
+        let error = store.reorder(&front).await.unwrap_err();
+        match (expect, error) {
+            ("duplicate", ReorderErr::Duplicate(id)) => assert_eq!(id, ids[2]),
+            ("missing", ReorderErr::NotFound(id)) => assert_eq!(id, missing),
+            ("finished", ReorderErr::Finished(id)) => assert_eq!(id, done),
+            (expect, other) => panic!("{expect}: {other:?}"),
+        }
+        assert_eq!(store.list().await.unwrap(), before);
+        assert!(events.try_recv().is_err());
+    }
+
+    let order = store.reorder(&[ids[2], ids[0]]).await.unwrap();
+    let titles: Vec<_> = order.iter().map(|j| j.title.as_str()).collect();
+    assert_eq!(titles, ["c", "a", "b", "d"]);
+    let positions: Vec<_> = order.iter().map(|j| j.queue_position).collect();
+    assert_eq!(positions, [0, 1, 2, 3]);
+    // Every job started at 0, so only "c" (still 0) is unchanged.
+    let mut moved = Vec::new();
+    while let Ok(event) = events.try_recv() {
+        assert!(matches!(event.kind, JobEventKind::Message { .. }));
+        moved.push(event.job_id);
+    }
+    moved.sort();
+    let mut expect = vec![ids[0], ids[1], ids[3]];
+    expect.sort();
+    assert_eq!(moved, expect);
+    let listed: Vec<_> = store
+        .list()
+        .await
+        .unwrap()
+        .into_iter()
+        .filter(|j| !j.state.is_terminal())
+        .map(|j| j.id)
+        .collect();
+    assert_eq!(listed, vec![ids[2], ids[0], ids[1], ids[3]]);
+    assert_eq!(store.get(done).await.unwrap().queue_position, 0);
+
+    // A new job lands behind the reordered queue; with no ordering it stays at 0.
+    let new = store.insert(Job::new(JobKind::Nzb, "e")).await.unwrap().id;
+    assert_eq!(store.append_to_queue(new).await.unwrap().queue_position, 4);
+    let listed: Vec<_> = store
+        .list()
+        .await
+        .unwrap()
+        .into_iter()
+        .filter(|j| !j.state.is_terminal())
+        .map(|j| j.title)
+        .collect();
+    assert_eq!(listed, ["c", "a", "b", "d", "e"]);
+
+    let fresh = tempfile::tempdir().unwrap();
+    let db = Database::connect(fresh.path().join("reelarr.db"))
+        .await
+        .unwrap();
+    let store = SqliteJobStore::new(&db);
+    store.insert(Job::new(JobKind::Nzb, "x")).await.unwrap();
+    let y = store.insert(Job::new(JobKind::Nzb, "y")).await.unwrap();
+    let after = store.append_to_queue(y.id).await.unwrap();
+    assert_eq!(after.queue_position, 0);
+    assert_eq!(after.last_event_seq, y.last_event_seq);
 }

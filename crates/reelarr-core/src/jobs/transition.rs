@@ -25,7 +25,9 @@ pub fn validate_transition(job: &Job, to: JobState) -> Result<(), TransitionErro
             Repairing => matches!(to, Extracting | Failed),
             Extracting => matches!(to, ReadyForImport | Failed),
             ReadyForImport => to == Importing,
-            Importing => matches!(to, Completed | Failed),
+            // Back to ReadyForImport: a retryable import failure waits for its
+            // next attempt (the same edge restart recovery takes).
+            Importing => matches!(to, Completed | Failed | ReadyForImport),
             Failed => {
                 to == Queued
                     || (to == ReadyForImport

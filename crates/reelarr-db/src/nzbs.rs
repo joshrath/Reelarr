@@ -55,6 +55,18 @@ impl SqliteNzbStore {
                 .map_err(backend)?;
         Ok(done.rows_affected())
     }
+
+    /// The movie a stored NZB was grabbed for, without decoding the document:
+    /// `None` when no NZB is stored for the job, `Some(None)` for a manual one.
+    pub async fn movie_id(&self, job_id: JobId) -> Result<Option<Option<MovieId>>, StoreError> {
+        let row: Option<(Option<i64>,)> =
+            sqlx::query_as("SELECT movie_id FROM nzb_documents WHERE job_id = ?")
+                .bind(job_id.to_string())
+                .fetch_optional(&self.pool)
+                .await
+                .map_err(backend)?;
+        Ok(row.map(|(movie,)| movie.map(MovieId)))
+    }
 }
 
 fn backend(_: sqlx::Error) -> StoreError {

@@ -7,9 +7,14 @@
 //! - with the `hydrate` feature (`wasm32-unknown-unknown`) it is built by
 //!   `cargo leptos` into `/pkg/reelarr.wasm` and hydrates the server HTML.
 
+pub mod api;
 pub mod app;
 pub mod components;
+pub mod counter;
+pub mod library;
 pub mod pages;
+pub mod playback;
+pub mod theme;
 
 #[cfg(feature = "ssr")]
 mod server;

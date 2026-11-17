@@ -11,6 +11,11 @@ impl Secret {
     pub fn new(value: impl Into<String>) -> Self {
         Self(value.into())
     }
+    /// Explicit exposure for encrypted-at-rest storage integration only.
+    /// Never log, format or return the result in an API response.
+    pub fn expose(&self) -> &str {
+        &self.0
+    }
 }
 impl fmt::Debug for Secret {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -126,7 +131,9 @@ impl ServerConfig {
             retry: RetryPolicy::default(),
         }
     }
-    pub(super) fn validate(&self) -> Result<(), Error> {
+    /// Check every local rule enforced at pool creation, without any I/O.
+    /// Errors carry only static descriptions, never the configured values.
+    pub fn validate(&self) -> Result<(), Error> {
         if self.host.is_empty()
             || self
                 .host
@@ -163,19 +170,23 @@ impl ServerConfig {
             return Err(Error::Config("retry policy"));
         }
         if let Some(c) = &self.credentials {
-            // Conservative AUTHINFO token subset: whitespace is not portable
-            // between servers (RFC 4643 §2.3.2). No ambiguous normalization.
-            for value in [&c.username.0, &c.password.0] {
-                if value.is_empty()
-                    || value.len() + 16 > 512
-                    || !value.bytes().all(|b| b.is_ascii_graphic())
-                {
-                    return Err(Error::Config(
-                        "AUTHINFO requires printable non-whitespace credentials within 512 bytes",
-                    ));
-                }
-            }
+            validate_credential(&c.username.0)?;
+            validate_credential(&c.password.0)?;
         }
         Ok(())
     }
+}
+
+/// Validate one AUTHINFO USER/PASS token without sending it anywhere.
+///
+/// Conservative AUTHINFO token subset: whitespace is not portable between
+/// servers (RFC 4643 §2.3.2), and there is no ambiguous normalization. The
+/// error never contains the value.
+pub fn validate_credential(value: &str) -> Result<(), Error> {
+    if value.is_empty() || value.len() + 16 > 512 || !value.bytes().all(|b| b.is_ascii_graphic()) {
+        return Err(Error::Config(
+            "AUTHINFO requires printable non-whitespace credentials within 512 bytes",
+        ));
+    }
+    Ok(())
 }

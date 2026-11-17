@@ -18,9 +18,17 @@ async fn test_app() -> Router {
 }
 
 async fn get(path: &str) -> (axum::http::StatusCode, String, String) {
+    get_with_cookie(path, "").await
+}
+
+async fn get_with_cookie(path: &str, cookie: &str) -> (axum::http::StatusCode, String, String) {
+    let mut req = Request::get(path);
+    if !cookie.is_empty() {
+        req = req.header("cookie", cookie);
+    }
     let res = test_app()
         .await
-        .oneshot(Request::get(path).body(Body::empty()).unwrap())
+        .oneshot(req.body(Body::empty()).unwrap())
         .await
         .unwrap();
     let status = res.status();
@@ -38,7 +46,7 @@ async fn get(path: &str) -> (axum::http::StatusCode, String, String) {
 }
 
 #[tokio::test]
-async fn library_page_renders_shell() {
+async fn store_floor_renders_shell() {
     let (status, content_type, body) = get("/").await;
     assert_eq!(status, 200);
     assert!(content_type.starts_with("text/html"));
@@ -47,15 +55,57 @@ async fn library_page_renders_shell() {
     assert!(body.contains("Skip to content"));
     assert!(body.contains(r#"aria-current="page""#));
     assert!(body.contains("/pkg/reelarr"));
+    assert!(body.contains("The Store Floor"));
+    assert!(body.contains(r#"<footer class="app-footer""#));
+    assert!(body.contains(r#"aria-label="Now playing""#));
+    assert!(body.contains(r#"data-theme="80s-vhs""#));
 }
 
 #[tokio::test]
 async fn app_routes_render() {
-    for path in ["/search", "/queue", "/settings"] {
+    for (path, title) in [
+        ("/counter", "The Special Order Counter"),
+        ("/records", "The Record Corner"),
+        ("/back-room", "The Back Room"),
+        ("/employees-only", "Employees Only"),
+    ] {
         let (status, _, body) = get(path).await;
         assert_eq!(status, 200, "{path}");
         assert!(body.contains("<main"), "{path}");
+        assert!(
+            body.contains(&format!(r#"<h1 id="page-title">{title}</h1>"#)),
+            "{path}"
+        );
     }
+}
+
+#[tokio::test]
+async fn old_paths_redirect_to_renamed_sections() {
+    for (from, to) in [
+        ("/search", "/counter"),
+        ("/queue", "/back-room"),
+        ("/settings", "/employees-only"),
+    ] {
+        let res = test_app()
+            .await
+            .oneshot(Request::get(from).body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(
+            res.status(),
+            axum::http::StatusCode::PERMANENT_REDIRECT,
+            "{from}"
+        );
+        assert_eq!(res.headers()["location"], to, "{from}");
+    }
+}
+
+#[tokio::test]
+async fn saved_display_prefs_render_on_the_server() {
+    let (_, _, body) = get_with_cookie("/", "reelarr_theme=70s-wood; reelarr_crt=on").await;
+    assert!(body.contains(r#"data-theme="70s-wood""#));
+    assert!(body.contains(r#"class="crt""#));
+    assert!(body.contains(r#"aria-pressed="true""#));
 }
 
 #[tokio::test]
@@ -170,4 +220,128 @@ async fn api_responses_keep_their_own_headers() {
         cookies.iter().any(|c| c.starts_with("reelarr_csrf=")),
         "{cookies:?}"
     );
+}
+
+#[tokio::test]
+async fn watch_page_renders_the_vcr_deck() {
+    let (status, content_type, body) = get("/watch/42").await;
+    assert_eq!(status, 200);
+    assert!(content_type.starts_with("text/html"));
+    // Playback info is fetched in the browser, so the server sends the deck
+    // in its loading state with the transport keys disabled.
+    assert!(body.contains(r#"aria-label="VCR player""#));
+    assert!(body.contains("Loading tape"));
+    assert!(body.contains(r#"aria-label="Seek""#));
+    assert!(body.contains(r#"aria-label="Volume""#));
+    for key in ["REW", "PLAY", "STOP", "FF", "EJECT", "CRT: ON"] {
+        assert!(body.contains(key), "{key}");
+    }
+    assert!(body.contains("--:--:--"));
+    assert!(!body.contains("<video"));
+    // The player is part of the Store Floor, and the footer deck stays empty.
+    assert!(body.contains(r#"<a href="/" aria-current="page""#));
+    assert!(body.contains("No tape in the deck"));
+}
+
+#[tokio::test]
+async fn store_floor_renders_the_shelf_while_checking() {
+    let (status, _, body) = get("/").await;
+    assert_eq!(status, 200);
+    // The library folders are fetched in the browser, so the server sends
+    // the empty shelf with a loading status and no titles.
+    assert!(body.contains(r#"aria-labelledby="shelf-title""#));
+    assert!(body.contains(r#"class="shelf-board""#));
+    assert!(body.contains("Checking the shelves"));
+    assert!(body.contains(r#"class="shelf-slot""#));
+    assert!(!body.contains(r#"class="clamshell"#));
+    assert!(!body.contains("/case/"));
+    assert!(body.contains("No tape in the deck"));
+}
+
+#[tokio::test]
+async fn case_page_renders_the_clamshell_while_loading() {
+    let (status, content_type, body) = get("/case/42").await;
+    assert_eq!(status, 200);
+    assert!(content_type.starts_with("text/html"));
+    assert!(body.contains(r#"aria-label="Breadcrumb""#));
+    assert!(body.contains("Case #42"));
+    assert!(body.contains("Tape #42"));
+    assert!(body.contains("Loading case"));
+    assert!(body.contains(r#"class="clamshell clamshell-large""#));
+    assert!(body.contains("No cover art"));
+    // No made-up details, and no Play link until the tape is known.
+    assert!(!body.contains("/watch/42"));
+    assert!(!body.to_lowercase().contains("synopsis"));
+    // The case belongs to the Store Floor, and the footer deck stays empty.
+    assert!(body.contains(r#"<a href="/" aria-current="page""#));
+    assert!(body.contains("No tape in the deck"));
+}
+
+#[tokio::test]
+async fn case_page_for_a_bad_id_still_renders_the_frame() {
+    let (status, _, body) = get("/case/not-a-number").await;
+    assert_eq!(status, 200);
+    assert!(body.contains("Case —"));
+    assert!(body.contains("Loading case"));
+}
+
+#[tokio::test]
+async fn counter_renders_the_search_desk() {
+    let (status, content_type, body) = get("/counter").await;
+    assert_eq!(status, 200);
+    assert!(content_type.starts_with("text/html"));
+    assert!(body.contains(r#"<h1 id="page-title">The Special Order Counter</h1>"#));
+    // A real search form and a labelled field, which works without JS too.
+    assert!(body.contains(r#"role="search""#));
+    assert!(body.contains(r#"action="/counter""#));
+    assert!(body.contains(r#"<label for="counter-q" class="visually-hidden">"#));
+    assert!(body.contains(r#"id="counter-q""#));
+    assert!(body.contains(r#"type="search""#));
+    assert!(body.contains(r#"name="q""#));
+    assert!(body.contains(r#"aria-label="Clear search""#));
+    assert!(body.contains(r#"aria-pressed="true""#));
+    // The session is checked in the browser; the server sends the desk
+    // with a loading status, and says plainly that search isn't hooked up.
+    assert!(body.contains("Search results &amp; shelf inventory"));
+    assert!(body.contains("Checking the counter"));
+    assert!(body.contains("Catalog search: not connected yet"));
+    assert!(body.contains("Desk clipboard // Active slips"));
+    assert!(body.contains("No order slips"));
+    // No sample titles, results or clerks from the design.
+    for made_up in [
+        "Blue Velvet",
+        "BLUE VELVET",
+        "Longlegs",
+        "LONGLEGS",
+        "Dune",
+        "DUNE",
+        "Furiosa",
+        "FURIOSA",
+        "Cure (1997)",
+        "CURE (1997)",
+        "Dave",
+        "DAVE",
+        "Prowlarr",
+        "PROWLARR",
+        "qBittorrent",
+        "SABnzbd",
+        "In stock",
+        "IN STOCK",
+        "/watch/",
+        "/case/",
+    ] {
+        assert!(!body.contains(made_up), "{made_up}");
+    }
+    // The counter is its own section, and the deck stays empty.
+    assert!(body.contains(r#"<a href="/counter" aria-current="page""#));
+    assert!(body.contains("No tape in the deck"));
+}
+
+#[tokio::test]
+async fn counter_keeps_the_query_without_inventing_results() {
+    let (status, _, body) = get("/counter?q=stop+making+sense").await;
+    assert_eq!(status, 200);
+    assert!(body.contains(r#"value="stop making sense""#));
+    assert!(!body.contains("1 result"));
+    assert!(!body.contains("IN STOCK"));
 }

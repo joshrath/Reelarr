@@ -202,3 +202,14 @@ async fn concurrent_checkpoint_batches_are_each_atomic() {
         task.await.unwrap();
     }
 }
+
+#[tokio::test]
+async fn movie_id_reads_the_grab_without_the_document() {
+    let db = Database::connect(":memory:").await.unwrap();
+    let store = SqliteNzbStore::new(&db);
+    let grabbed = admit(&db, Some(MOVIE)).await;
+    let manual = admit(&db, None).await;
+    assert_eq!(store.movie_id(grabbed).await.unwrap(), Some(Some(MOVIE)));
+    assert_eq!(store.movie_id(manual).await.unwrap(), Some(None));
+    assert_eq!(store.movie_id(JobId::new()).await.unwrap(), None);
+}

@@ -82,6 +82,10 @@ pub enum PathMapping {
 /// import or cleanup. A crash during import recovers to ReadyForImport, so the media
 /// implementation must also make its own file/database work retry-safe.
 ///
+/// Every handler failure ends in `Failed` (retryable ones keep `retryable: true`
+/// for a user retry). Schedulers that retry imports themselves use
+/// [`attempt_import`] instead.
+///
 /// The media handler persists media_file_id in its own store; this function changes
 /// only the job lifecycle; reelarr-db supplies the durable JobStore adapter.
 pub async fn run_import(
@@ -91,10 +95,51 @@ pub async fn run_import(
     download: CompletedDownload,
     mapping: PathMapping,
 ) -> Result<Job, JobStoreError> {
+    match import_once(store, handler, cleanups, download, mapping, false).await? {
+        ImportAttempt::Finished(job) => Ok(job),
+        ImportAttempt::Retry { job, .. } => Ok(job),
+    }
+}
+
+/// What one [`attempt_import`] call left behind.
+#[derive(Clone, Debug, PartialEq)]
+pub enum ImportAttempt {
+    /// `Completed` (cleanup ran), or `Failed` for a terminal failure, no match,
+    /// or a path/movie-id problem found before the handler ran.
+    Finished(Job),
+    /// The handler reported a retryable failure: the job is back in
+    /// `ReadyForImport` (with the reason as a job message) and the caller
+    /// schedules the next attempt.
+    Retry { job: Job, failure: Failure },
+}
+
+/// [`run_import`] for a scheduler that retries imports itself: a retryable
+/// [`ImportResult::Failed`] returns the job to `ReadyForImport` instead of
+/// failing it. Everything else is the same, including that source cleanup
+/// runs only after `Completed`.
+pub async fn attempt_import(
+    store: &dyn JobStore,
+    handler: &dyn ImportHandler,
+    cleanups: &CleanupRegistry,
+    download: CompletedDownload,
+    mapping: PathMapping,
+) -> Result<ImportAttempt, JobStoreError> {
+    import_once(store, handler, cleanups, download, mapping, true).await
+}
+
+async fn import_once(
+    store: &dyn JobStore,
+    handler: &dyn ImportHandler,
+    cleanups: &CleanupRegistry,
+    download: CompletedDownload,
+    mapping: PathMapping,
+    retry_in_place: bool,
+) -> Result<ImportAttempt, JobStoreError> {
+    use ImportAttempt::Finished;
     let id = download.job_id;
     let snapshot = store.get(id).await?;
     if snapshot.state == JobState::Completed {
-        return Ok(snapshot);
+        return Ok(Finished(snapshot));
     }
     store.transition(id, JobState::Importing, None).await?;
     if mapping == PathMapping::Unmapped || !download.output_path.is_absolute() {
@@ -108,7 +153,8 @@ pub async fn run_import(
                     retryable: true,
                 }),
             )
-            .await;
+            .await
+            .map(Finished);
     }
     if download.source == DownloadSource::BuiltinNzb && download.movie_id.is_none() {
         return store
@@ -121,7 +167,8 @@ pub async fn run_import(
                     retryable: false,
                 }),
             )
-            .await;
+            .await
+            .map(Finished);
     }
     match handler.import(download.clone()).await {
         ImportResult::Imported { .. } => {
@@ -140,37 +187,48 @@ pub async fn run_import(
                 }
             }
             // Include the cleanup-message watermark when available; Completed is stable.
-            Ok(store.get(id).await.unwrap_or(completed))
+            Ok(Finished(store.get(id).await.unwrap_or(completed)))
         }
         ImportResult::Failed {
             reason,
             retryable,
             code,
         } => {
+            let failure = Failure {
+                code: code.unwrap_or(FailureCode::Other),
+                message: reason,
+                retryable,
+            };
+            if retry_in_place && retryable {
+                let waiting = store.transition(id, JobState::ReadyForImport, None).await?;
+                let job = match store
+                    .message(id, format!("Import will be retried: {}", failure.message))
+                    .await
+                {
+                    Ok(job) => job,
+                    Err(error) => {
+                        tracing::warn!(job_id = %id, %error, "Could not emit import retry message");
+                        waiting
+                    }
+                };
+                return Ok(ImportAttempt::Retry { job, failure });
+            }
             store
-                .transition(
-                    id,
-                    JobState::Failed,
-                    Some(Failure {
-                        code: code.unwrap_or(FailureCode::Other),
-                        message: reason,
-                        retryable,
-                    }),
-                )
+                .transition(id, JobState::Failed, Some(failure))
                 .await
+                .map(Finished)
         }
-        ImportResult::NoMatch => {
-            store
-                .transition(
-                    id,
-                    JobState::Failed,
-                    Some(Failure {
-                        code: FailureCode::NoMatch,
-                        message: "No matching movie found".into(),
-                        retryable: false,
-                    }),
-                )
-                .await
-        }
+        ImportResult::NoMatch => store
+            .transition(
+                id,
+                JobState::Failed,
+                Some(Failure {
+                    code: FailureCode::NoMatch,
+                    message: "No matching movie found".into(),
+                    retryable: false,
+                }),
+            )
+            .await
+            .map(Finished),
     }
 }

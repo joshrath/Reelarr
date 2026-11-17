@@ -159,6 +159,18 @@ fn dest_in(root: &LibraryRoot) -> PathBuf {
         .join("The Example Movie (2004) [1080p].mkv")
 }
 
+fn dest_folder(root: &LibraryRoot) -> PathBuf {
+    Path::new(&root.path)
+        .join("The Example Movie (2004)")
+        .join("The Example Movie (2004)")
+}
+
+fn write_disc_tree(dir: &Path) {
+    std::fs::create_dir_all(dir.join("BDMV/STREAM")).unwrap();
+    std::fs::write(dir.join("BDMV/index.bdmv"), b"idx!!").unwrap();
+    std::fs::write(dir.join("BDMV/STREAM/00001.m2ts"), vec![b'x'; 5000]).unwrap();
+}
+
 fn imported(result: ImportResult) -> MediaFileId {
     match result {
         ImportResult::Imported { media_file_id } => media_file_id,
@@ -515,7 +527,8 @@ async fn crash_after_move_wrong_size_dest_is_a_conflict() {
     let job = JobId::new();
     crashed_plan(&env, job, &root, &source, TransferMode::Move).await;
     std::fs::remove_file(&source).unwrap();
-    std::fs::write(dest_in(&root), b"someone else's file").unwrap();
+    let dest = dest_in(&root);
+    std::fs::write(&dest, b"someone else's file").unwrap();
 
     let result = env
         .handler(|o| o.mode = TransferMode::Move)
@@ -524,6 +537,45 @@ async fn crash_after_move_wrong_size_dest_is_a_conflict() {
     assert_eq!(
         failed(result),
         (false, Some(FailureCode::DestinationConflict))
+    );
+    let entry = SqliteImportLedger::new(&env.db)
+        .get(&job.to_string())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(entry.state, LedgerState::Pending);
+    assert_eq!(entry.dest_path, dest.to_string_lossy());
+    assert!(entry.media_file_id.is_none());
+    assert_eq!(env.file_count().await, 0);
+}
+
+/// A dest whose canonicalize returns ELOOP is a terminal conflict on a
+/// fresh import. Move-finish recovery of an unreadable dest stays
+/// retryable RootOffline; see
+/// [`crash_after_move_unreadable_dest_on_a_healthy_root_is_retryable`].
+#[tokio::test]
+async fn dest_symlink_loop_on_a_fresh_import_is_a_conflict() {
+    let env = env().await;
+    let root = env.root("library").await;
+    let source = env.download(b"main feature bytes");
+    let dest = dest_in(&root);
+    std::fs::create_dir_all(dest.parent().unwrap()).unwrap();
+    std::os::unix::fs::symlink(&dest, &dest).unwrap();
+
+    let job = JobId::new();
+    let result = env.handler(|_| {}).import(env.completed(job)).await;
+    assert_eq!(
+        failed(result),
+        (false, Some(FailureCode::DestinationConflict))
+    );
+    assert!(source.exists());
+    assert!(
+        SqliteImportLedger::new(&env.db)
+            .get(&job.to_string())
+            .await
+            .unwrap()
+            .is_none(),
+        "a conflict before place must not leave a pending row"
     );
 }
 
@@ -586,4 +638,238 @@ async fn crash_after_move_unreadable_dest_on_a_healthy_root_is_retryable() {
         .unwrap()
         .unwrap();
     assert_eq!(entry.state, LedgerState::Pending);
+}
+
+#[tokio::test]
+async fn disc_folder_import_records_the_tree() {
+    let env = env().await;
+    let root = env.root("library").await;
+    write_disc_tree(&env.downloads.join(RELEASE));
+    let id = imported(
+        env.handler(|_| {})
+            .import(env.completed(JobId::new()))
+            .await,
+    );
+    let dest = dest_folder(&root);
+    assert!(dest.join("BDMV/index.bdmv").exists());
+    assert_eq!(
+        dest.join("BDMV/STREAM/00001.m2ts")
+            .metadata()
+            .unwrap()
+            .len(),
+        5000
+    );
+    let stored = SqliteMediaFileStore::new(&env.db)
+        .get(id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(stored.kind, MediaKind::DiscFolder);
+    assert!(stored.probe.is_none());
+    assert_eq!(stored.size_bytes, 5 + 5000);
+}
+
+#[tokio::test]
+async fn crash_after_move_of_disc_folder_finishes_from_dest_tree() {
+    let env = env().await;
+    let root = env.root("library").await;
+    let dest = dest_folder(&root);
+    write_disc_tree(&dest);
+    let job = JobId::new();
+    SqliteImportLedger::new(&env.db)
+        .put_pending(&LedgerEntry {
+            job_id: job.to_string(),
+            state: LedgerState::Pending,
+            movie_id: env.movie,
+            root_id: root.id,
+            kind: MediaKind::DiscFolder,
+            source_path: env.downloads.join(RELEASE).to_string_lossy().into_owned(),
+            dest_path: dest.to_string_lossy().into_owned(),
+            mode: TransferMode::Move,
+            size_bytes: 5 + 5000,
+            media_file_id: None,
+        })
+        .await
+        .unwrap();
+    let id = imported(env.handler(|_| {}).import(env.completed(job)).await);
+    let stored = SqliteMediaFileStore::new(&env.db)
+        .get(id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(stored.kind, MediaKind::DiscFolder);
+    assert_eq!(stored.size_bytes, 5 + 5000);
+    assert_eq!(PathBuf::from(&stored.path), dest);
+}
+
+#[tokio::test]
+async fn crash_after_move_of_disc_folder_with_empty_source_dir_finishes() {
+    let env = env().await;
+    let root = env.root("library").await;
+    let dest = dest_folder(&root);
+    write_disc_tree(&dest);
+    let source = env.downloads.join(RELEASE);
+    std::fs::create_dir_all(&source).unwrap();
+    let job = JobId::new();
+    SqliteImportLedger::new(&env.db)
+        .put_pending(&LedgerEntry {
+            job_id: job.to_string(),
+            state: LedgerState::Pending,
+            movie_id: env.movie,
+            root_id: root.id,
+            kind: MediaKind::DiscFolder,
+            source_path: source.to_string_lossy().into_owned(),
+            dest_path: dest.to_string_lossy().into_owned(),
+            mode: TransferMode::Move,
+            size_bytes: 5 + 5000,
+            media_file_id: None,
+        })
+        .await
+        .unwrap();
+    let id = imported(
+        env.handler(|o| o.mode = TransferMode::Move)
+            .import(env.completed(job))
+            .await,
+    );
+    let stored = SqliteMediaFileStore::new(&env.db)
+        .get(id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(stored.kind, MediaKind::DiscFolder);
+    assert_eq!(stored.size_bytes, 5 + 5000);
+    assert!(!source.exists(), "leftover empty source folder cleaned up");
+}
+
+#[tokio::test]
+async fn disc_folder_resume_clears_stale_partials() {
+    let env = env().await;
+    let root = env.root("library").await;
+    let source = env.downloads.join(RELEASE);
+    write_disc_tree(&source);
+    let dest = dest_folder(&root);
+    std::fs::create_dir_all(dest.join("BDMV/STREAM")).unwrap();
+    std::fs::write(dest.join("BDMV/index.bdmv"), b"idx!!").unwrap();
+    let partial = dest.join("BDMV/STREAM/00001.m2ts.reelarr-partial");
+    std::fs::write(&partial, vec![b'x'; 100]).unwrap();
+    let job = JobId::new();
+    SqliteImportLedger::new(&env.db)
+        .put_pending(&LedgerEntry {
+            job_id: job.to_string(),
+            state: LedgerState::Pending,
+            movie_id: env.movie,
+            root_id: root.id,
+            kind: MediaKind::DiscFolder,
+            source_path: source.to_string_lossy().into_owned(),
+            dest_path: dest.to_string_lossy().into_owned(),
+            mode: TransferMode::Copy,
+            size_bytes: 5 + 5000,
+            media_file_id: None,
+        })
+        .await
+        .unwrap();
+    let id = imported(
+        env.handler(|o| o.mode = TransferMode::Copy)
+            .import(env.completed(job))
+            .await,
+    );
+    assert_eq!(
+        dest.join("BDMV/STREAM/00001.m2ts")
+            .metadata()
+            .unwrap()
+            .len(),
+        5000
+    );
+    assert!(!partial.exists());
+    let stored = SqliteMediaFileStore::new(&env.db)
+        .get(id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(stored.kind, MediaKind::DiscFolder);
+    assert_eq!(stored.size_bytes, 5 + 5000);
+    let entry = SqliteImportLedger::new(&env.db)
+        .get(&job.to_string())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(entry.state, LedgerState::Done);
+}
+
+fn write_dotfile(dir: &Path) {
+    std::fs::write(dir.join("BDMV/.DS_Store"), b"dsstore!!").unwrap();
+}
+
+#[tokio::test]
+async fn crash_after_move_of_disc_folder_with_dotfile_finishes() {
+    let env = env().await;
+    let root = env.root("library").await;
+    let dest = dest_folder(&root);
+    write_disc_tree(&dest);
+    write_dotfile(&dest);
+    let job = JobId::new();
+    SqliteImportLedger::new(&env.db)
+        .put_pending(&LedgerEntry {
+            job_id: job.to_string(),
+            state: LedgerState::Pending,
+            movie_id: env.movie,
+            root_id: root.id,
+            kind: MediaKind::DiscFolder,
+            source_path: env.downloads.join(RELEASE).to_string_lossy().into_owned(),
+            dest_path: dest.to_string_lossy().into_owned(),
+            mode: TransferMode::Move,
+            size_bytes: 5 + 5000,
+            media_file_id: None,
+        })
+        .await
+        .unwrap();
+    let id = imported(env.handler(|_| {}).import(env.completed(job)).await);
+    let stored = SqliteMediaFileStore::new(&env.db)
+        .get(id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(stored.kind, MediaKind::DiscFolder);
+    assert_eq!(stored.size_bytes, 5 + 5000);
+    assert_eq!(PathBuf::from(&stored.path), dest);
+}
+
+#[tokio::test]
+async fn crash_after_move_of_disc_folder_with_dotfile_and_empty_source_dir_finishes() {
+    let env = env().await;
+    let root = env.root("library").await;
+    let dest = dest_folder(&root);
+    write_disc_tree(&dest);
+    write_dotfile(&dest);
+    let source = env.downloads.join(RELEASE);
+    std::fs::create_dir_all(&source).unwrap();
+    let job = JobId::new();
+    SqliteImportLedger::new(&env.db)
+        .put_pending(&LedgerEntry {
+            job_id: job.to_string(),
+            state: LedgerState::Pending,
+            movie_id: env.movie,
+            root_id: root.id,
+            kind: MediaKind::DiscFolder,
+            source_path: source.to_string_lossy().into_owned(),
+            dest_path: dest.to_string_lossy().into_owned(),
+            mode: TransferMode::Move,
+            size_bytes: 5 + 5000,
+            media_file_id: None,
+        })
+        .await
+        .unwrap();
+    let id = imported(
+        env.handler(|o| o.mode = TransferMode::Move)
+            .import(env.completed(job))
+            .await,
+    );
+    let stored = SqliteMediaFileStore::new(&env.db)
+        .get(id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(stored.kind, MediaKind::DiscFolder);
+    assert_eq!(stored.size_bytes, 5 + 5000);
+    assert!(!source.exists(), "leftover empty source folder cleaned up");
 }

@@ -407,12 +407,12 @@ async fn loose_video_beside_a_disc_structure_is_recorded_too() {
     write(
         dir.path(),
         "Movie (2010)/Extras/featurette.mkv",
-        b"not scanned",
+        b"featurette",
     );
 
     let s = scanner();
     let report = s.scan_root(&root(dir.path())).await.unwrap();
-    assert_eq!(report.added, 2);
+    assert_eq!(report.added, 3);
     let files = s.store().list_by_root(LibraryRootId(1)).await.unwrap();
     let kinds: Vec<_> = files.iter().map(|f| (f.path.clone(), f.kind)).collect();
     assert!(
@@ -426,6 +426,20 @@ async fn loose_video_beside_a_disc_structure_is_recorded_too() {
             .iter()
             .any(|(p, k)| p.ends_with("Movie (2010).mkv") && *k == MediaKind::File),
         "{kinds:?}"
+    );
+    assert!(
+        kinds
+            .iter()
+            .any(|(p, k)| p.ends_with("Extras/featurette.mkv") && *k == MediaKind::File),
+        "{kinds:?}"
+    );
+    let disc = files
+        .iter()
+        .find(|f| f.kind == MediaKind::DiscFolder)
+        .unwrap();
+    assert_eq!(
+        disc.size_bytes, 5,
+        "sibling mkv and extras must not count toward disc folder size"
     );
 
     let report = s.scan_root(&root(dir.path())).await.unwrap();

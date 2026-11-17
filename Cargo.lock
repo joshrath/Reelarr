@@ -2720,24 +2720,34 @@ dependencies = [
 name = "reelarr-server"
 version = "0.0.1"
 dependencies = [
+ "async-trait",
  "axum",
+ "crc32fast",
+ "futures-util",
  "http-body-util",
  "leptos",
+ "rcgen",
  "reelarr-core",
  "reelarr-db",
+ "reelarr-indexer",
  "reelarr-media",
+ "reelarr-nzb",
  "reelarr-stream",
  "reelarr-types",
  "reelarr-ui",
+ "rustls",
  "serde",
  "serde_json",
  "sqlx",
  "subtle",
  "tempfile",
+ "thiserror 2.0.21",
  "tokio",
+ "tokio-rustls",
  "tower",
  "tracing",
  "tracing-subscriber",
+ "wiremock",
 ]
 
 [[package]]
@@ -2777,9 +2787,12 @@ dependencies = [
  "leptos_router",
  "reelarr-types",
  "serde",
+ "serde_json",
  "tokio",
  "tower",
  "wasm-bindgen",
+ "wasm-bindgen-futures",
+ "web-sys",
 ]
 
 [[package]]

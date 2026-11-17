@@ -41,8 +41,13 @@ mod config;
 mod connection;
 mod pool;
 
-pub use config::{Credentials, Limits, RetryPolicy, Secret, ServerConfig, Timeouts};
+pub use config::{
+    Credentials, Limits, RetryPolicy, Secret, ServerConfig, Timeouts, validate_credential,
+};
 pub use pool::Pool;
+/// Trust anchors accepted by [`Pool::with_root_certificates`]; re-exported so
+/// callers can hold a custom store without a direct rustls dependency.
+pub use rustls::RootCertStore;
 use std::io;
 use thiserror::Error;
 

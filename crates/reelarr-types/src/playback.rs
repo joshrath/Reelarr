@@ -46,6 +46,8 @@ pub enum UnsupportedKind {
     AudioCodec,
     /// The file has not been probed yet, so support is unknown.
     NotProbed,
-    /// A disc rip (ISO or VIDEO_TS/BDMV folder), not playable yet.
+    /// A disc-image file (ISO), not playable yet.
     DiscImage,
+    /// A DVD/Blu-ray folder rip, not playable yet.
+    DiscFolder,
 }

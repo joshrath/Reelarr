@@ -258,6 +258,6 @@ async fn unrecognized_images_and_disc_folders_get_their_own_message() {
     assert_eq!(junk.unsupported[0].kind, UnsupportedKind::Container);
     assert!(!junk.unsupported[0].message.contains("Disc image"));
     let folder = info(2).await.unwrap();
-    assert_eq!(folder.unsupported[0].kind, UnsupportedKind::DiscImage);
+    assert_eq!(folder.unsupported[0].kind, UnsupportedKind::DiscFolder);
     assert!(folder.unsupported[0].message.contains("folder"));
 }

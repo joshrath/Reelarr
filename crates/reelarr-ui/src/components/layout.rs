@@ -1,8 +1,9 @@
-//! The application frame: skip link, header with navigation, and main region.
+//! The application frame: skip link, header, main region and the deck.
 
 use leptos::prelude::*;
 
-use super::nav::MainNav;
+use super::footer::Footer;
+use super::header::Header;
 
 /// Id of the `<main>` element targeted by the skip link.
 pub const MAIN_ID: &str = "main-content";
@@ -12,12 +13,10 @@ pub const MAIN_ID: &str = "main-content";
 pub fn Layout(children: Children) -> impl IntoView {
     view! {
         <a class="skip-link" href=format!("#{MAIN_ID}")>"Skip to content"</a>
-        <header class="app-header">
-            <a class="brand" href="/">"Reelarr"</a>
-            <MainNav />
-        </header>
+        <Header />
         <main id=MAIN_ID class="app-main" tabindex="-1">
             {children()}
         </main>
+        <Footer />
     }
 }

@@ -94,7 +94,7 @@ pub async fn playback_info(
     if !file.kind.is_streamable() {
         let reason = match file.kind {
             MediaKind::DiscFolder => UnsupportedReason {
-                kind: UnsupportedKind::DiscImage,
+                kind: UnsupportedKind::DiscFolder,
                 name: None,
                 message: "DVD/Blu-ray folder (not yet playable)".into(),
             },
