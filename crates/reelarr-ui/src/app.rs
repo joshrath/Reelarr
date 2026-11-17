@@ -7,6 +7,7 @@ use leptos_router::{
     components::{Route, Router, Routes},
 };
 
+use crate::components::header::SearchFocus;
 use crate::components::layout::Layout;
 use crate::pages::{
     back_room::BackRoomPage, case::CasePage, counter::CounterPage,
@@ -52,6 +53,7 @@ pub fn shell(options: LeptosOptions) -> impl IntoView {
 pub fn App() -> impl IntoView {
     provide_meta_context();
     PrefsSignal::provide();
+    SearchFocus::provide();
 
     view! {
         <Stylesheet id="reelarr" href="/pkg/reelarr.css" />

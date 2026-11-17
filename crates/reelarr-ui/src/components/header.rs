@@ -2,14 +2,55 @@
 //! CRT and theme switches, and the account menu.
 
 use leptos::{ev, prelude::*};
-use leptos_router::hooks::use_navigate;
+use leptos_router::hooks::{use_location, use_navigate};
 
 use super::icon::{Icon, IconName};
 use super::nav::MainNav;
+use crate::counter::{SearchShortcut, search_shortcut};
 use crate::theme::{PrefsSignal, Theme};
 
 /// Where the search field and the Ctrl/⌘+K shortcut lead.
 pub const SEARCH_PATH: &str = "/counter";
+
+/// The signal that puts the cursor in the counter's search field.
+///
+/// The header's search link and the Ctrl/⌘+K shortcut [`request`] focus;
+/// the counter page [`take`]s the request once its field exists and focuses
+/// it. Nothing else sets it, so loading or reloading `/counter` directly, or
+/// arriving from the section nav, leaves focus where the browser puts it.
+/// Provided once by the app root, so it outlives page changes.
+///
+/// [`request`]: SearchFocus::request
+/// [`take`]: SearchFocus::take
+#[derive(Clone, Copy)]
+pub struct SearchFocus(RwSignal<bool>);
+
+impl SearchFocus {
+    pub fn provide() -> Self {
+        let signal = Self(RwSignal::new(false));
+        provide_context(signal);
+        signal
+    }
+
+    pub fn use_context() -> Option<Self> {
+        use_context::<Self>()
+    }
+
+    /// Asks the counter to focus its search field.
+    pub fn request(self) {
+        self.0.set(true);
+    }
+
+    /// Whether focus was requested, clearing the request. Tracked, so an
+    /// effect calling it reruns on the next request.
+    pub fn take(self) -> bool {
+        let requested = self.0.get();
+        if requested {
+            self.0.set(false);
+        }
+        requested
+    }
+}
 
 #[component]
 pub fn Header() -> AnyView {
@@ -17,12 +58,24 @@ pub fn Header() -> AnyView {
     let drawer_open = RwSignal::new(false);
     let menu_open = RwSignal::new(false);
 
-    // Ctrl/⌘+K opens search; Escape closes the menu and the drawer.
+    let search_focus = SearchFocus::use_context();
+    let request_search_focus = move || {
+        if let Some(focus) = search_focus {
+            focus.request();
+        }
+    };
+
+    // Ctrl/⌘+K opens search (or, on the counter, focuses its field and
+    // keeps the address); Escape closes the menu and the drawer.
     let navigate = use_navigate();
+    let location = use_location();
     let key_handle = window_event_listener(ev::keydown, move |e| {
         if (e.ctrl_key() || e.meta_key()) && e.key().eq_ignore_ascii_case("k") {
             e.prevent_default();
-            navigate(SEARCH_PATH, Default::default());
+            request_search_focus();
+            if search_shortcut(&location.pathname.get_untracked()) == SearchShortcut::GoToCounter {
+                navigate(SEARCH_PATH, Default::default());
+            }
         } else if e.key() == "Escape" {
             menu_open.set(false);
             drawer_open.set(false);
@@ -69,7 +122,7 @@ pub fn Header() -> AnyView {
                 </button>
                 <a class="brand" href="/">"Reelarr"</a>
                 <MainNav class="main-nav-bar" />
-                <a class="header-search" href=SEARCH_PATH>
+                <a class="header-search" href=SEARCH_PATH on:click=move |_| request_search_focus()>
                     <Icon name=IconName::Search />
                     <span class="header-search-text">"Search archive…"</span>
                     <kbd aria-label="Shortcut: Control or Command K">"⌘K"</kbd>
